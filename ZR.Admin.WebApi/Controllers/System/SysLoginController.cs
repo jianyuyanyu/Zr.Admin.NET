@@ -67,8 +67,8 @@ namespace ZR.Admin.WebApi.Controllers.System
 
             List<SysRole> roles = roleService.SelectUserRoleListByUserId(user.UserId);
             //权限集合 eg *:*:*,system:user:list
-            List<string> permissions = permissionService.GetMenuPermission(new SysUserDto() { UserId = user.UserId});
-            
+            List<string> permissions = permissionService.GetMenuPermission(new SysUserDto() { UserId = user.UserId });
+
             TokenModel loginUser = new(user.Adapt<TokenModel>(), roles.Adapt<List<Roles>>())
             {
                 TenantId = loginBody.TenantId,
@@ -103,7 +103,7 @@ namespace ZR.Admin.WebApi.Controllers.System
         {
             long userId = HttpContext.GetUId();
             var user = sysUserService.SelectUserById(userId);
-            
+
             //前端校验按钮权限使用
             //角色集合 eg: admin,yunying,common
             List<string> roles = permissionService.GetRolePermission(user);
@@ -370,6 +370,31 @@ namespace ZR.Admin.WebApi.Controllers.System
             var result = sysUserService.ChangePhoneNum(uid, loginBody.PhoneNum);
 
             return SUCCESS(result);
+        }
+
+        /// <summary>
+        /// 解锁屏幕
+        /// </summary>
+        /// <returns></returns>
+        [Route("/unlockscreen")]
+        public IActionResult Unlockscreen([FromBody] LoginBodyDto dto)
+        {
+            if (dto == null || dto.Password.IsEmpty())
+            {
+                throw new CustomException("密码不能为空");
+            }
+            dto.Username = HttpContext.GetName();
+
+            if (dto.Password.Length != 32)
+            {
+                dto.Password = NETCore.Encrypt.EncryptProvider.Md5(dto.Password);
+            }
+            SysUser user = sysUserService.Login(dto);
+            if (user == null)
+            {
+                return ToResponse(ResultCode.CUSTOM_ERROR, "密码错误,请重新输入");
+            }
+            return SUCCESS(1);
         }
     }
 }
