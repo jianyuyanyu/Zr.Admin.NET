@@ -1,8 +1,10 @@
 ﻿using Infrastructure;
 using Infrastructure.Model;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using System.Security.Claims;
 using ZR.Common;
 
@@ -15,15 +17,18 @@ namespace ZR.ServiceCore.Middleware
     {
         private readonly RequestDelegate _next;
         private readonly ILogger<JwtAuthMiddleware> _logger;
+        private readonly OptionsSetting _options;
         private static readonly string[] _whitelistPaths = Array.Empty<string>();
         
         // Token 刷新阈值（分钟）
-        private const int TOKEN_REFRESH_THRESHOLD_MINUTES = 5;
+        private int TOKEN_REFRESH_THRESHOLD_MINUTES = 5;
 
-        public JwtAuthMiddleware(RequestDelegate next, ILogger<JwtAuthMiddleware> logger)
+        public JwtAuthMiddleware(RequestDelegate next, ILogger<JwtAuthMiddleware> logger, IOptions<OptionsSetting> options)
         {
             _next = next;
             _logger = logger;
+            _options = options.Value;
+            TOKEN_REFRESH_THRESHOLD_MINUTES = _options.JwtSettings.RefreshTokenTime;
         }
 
         public async Task InvokeAsync(HttpContext context)
@@ -36,7 +41,7 @@ namespace ZR.ServiceCore.Middleware
                 await _next(context);
                 return;
             }
-
+            //_logger.LogInformation($"处理请求: {path}");
             // 白名单路径检查
             if (_whitelistPaths.Any(p => !string.IsNullOrEmpty(p) && path.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
             {
@@ -64,7 +69,7 @@ namespace ZR.ServiceCore.Middleware
                     await TryRefreshTokenAsync(context, loginUser);
 
                     // 挂载到 context.User
-                    var identity = new ClaimsIdentity(JwtUtil.AddClaims(loginUser), "jwt");
+                    var identity = new ClaimsIdentity(JwtUtil.AddClaims(loginUser), JwtBearerDefaults.AuthenticationScheme);
                     context.User = new ClaimsPrincipal(identity);
 
                     await _next(context);
@@ -88,10 +93,18 @@ namespace ZR.ServiceCore.Middleware
         /// <summary>
         /// 尝试刷新 Token
         /// </summary>
+        /// <param name="context"></param>
+        /// <param name="loginUser"></param>
+        /// <returns></returns>
         private async Task TryRefreshTokenAsync(HttpContext context, TokenModel loginUser)
         {
-            var now = DateTime.Now; // 使用本地时间
-            var ts = loginUser.ExpireTime - now;
+            // 使用 UTC 对齐，确保与 JwtSecurityToken.ValidTo 对比一致
+            var now = DateTime.UtcNow;
+            var expireUtc = loginUser.ExpireTime.Kind == DateTimeKind.Unspecified
+                ? DateTime.SpecifyKind(loginUser.ExpireTime, DateTimeKind.Utc)
+                : loginUser.ExpireTime.ToUniversalTime();
+
+            var ts = expireUtc - now;
             
             // Token 即将过期但还未过期时才刷新
             if (ts.TotalMinutes > 0 && ts.TotalMinutes < TOKEN_REFRESH_THRESHOLD_MINUTES)
@@ -112,10 +125,14 @@ namespace ZR.ServiceCore.Middleware
                         string osType = context.Request.Headers["os"];
                         if (!string.IsNullOrEmpty(osType) || context.Request.Headers.ContainsKey("Origin"))
                         {
-                            context.Response.Headers.Append("Access-Control-Expose-Headers", "X-Refresh-Token");
+                            // 如果已有该 Header，避免重复追加 (防止多次刷新时重复)
+                            if (!context.Response.Headers.ContainsKey("Access-Control-Expose-Headers"))
+                            {
+                                context.Response.Headers.Append("Access-Control-Expose-Headers", "X-Refresh-Token");
+                            }
                         }
-                        
-                        context.Response.Headers.Append("X-Refresh-Token", newToken);
+                        // 覆盖而不是多次追加
+                        context.Response.Headers["X-Refresh-Token"] = newToken;
                         _logger.LogInformation($"刷新Token成功: UserId={loginUser.UserId}, UserName={loginUser.UserName}, 剩余时间={ts.TotalMinutes:F2}分钟");
                     }
                     catch (Exception ex)
@@ -126,6 +143,7 @@ namespace ZR.ServiceCore.Middleware
                     }
                 }
             }
+            await Task.CompletedTask;
         }
     }
 }

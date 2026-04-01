@@ -42,12 +42,10 @@ namespace Infrastructure
             JwtSettings jwtSettings = new();
             AppSettings.Bind("JwtSettings", jwtSettings);
 
-            var authTime = DateTime.Now;
+            var authTime = DateTime.UtcNow;
             var expiresAt = authTime.AddMinutes(jwtSettings.Expire);
             var tokenHandler = new JwtSecurityTokenHandler();
             var key = Encoding.ASCII.GetBytes(jwtSettings.SecretKey);
-            claims.Add(new Claim("Audience", jwtSettings.Audience));
-            claims.Add(new Claim("Issuer", jwtSettings.Issuer));
 
             var tokenDescriptor = new SecurityTokenDescriptor
             {
