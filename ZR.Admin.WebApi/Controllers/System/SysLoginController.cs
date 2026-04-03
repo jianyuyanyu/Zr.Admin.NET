@@ -117,7 +117,8 @@ namespace ZR.Admin.WebApi.Controllers.System
                 user = user.Adapt<SysUserDto>(),
                 roles,
                 permissions,
-                isDefaultModifyPwd = InitPassword(user.PwdUpdateTime)
+                isDefaultModifyPwd = InitPassword(user.PwdUpdateTime),
+                isPasswordExpired = CheckPasswordExpire(user.PwdUpdateTime)
             });
         }
 
