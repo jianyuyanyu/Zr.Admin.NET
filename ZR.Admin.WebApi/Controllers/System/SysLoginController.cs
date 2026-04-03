@@ -112,7 +112,13 @@ namespace ZR.Admin.WebApi.Controllers.System
             user.WelcomeContent = GlobalConstant.WelcomeMessages[new Random().Next(0, GlobalConstant.WelcomeMessages.Length)];
             user.Password = string.Empty;
             CacheService.SetUserPerms(GlobalConstant.UserPermKEY + userId, permissions);
-            return SUCCESS(new { user = user.Adapt<SysUserDto>(), roles, permissions });
+            return SUCCESS(new
+            {
+                user = user.Adapt<SysUserDto>(),
+                roles,
+                permissions,
+                isDefaultModifyPwd = InitPassword(user.PwdUpdateTime)
+            });
         }
 
         /// <summary>
@@ -395,6 +401,30 @@ namespace ZR.Admin.WebApi.Controllers.System
                 return ToResponse(ResultCode.CUSTOM_ERROR, "密码错误,请重新输入");
             }
             return SUCCESS(1);
+        }
+
+        /// <summary>
+        /// 检查密码是否提醒
+        /// </summary>
+        /// <param name="pwdUpdateTime"></param>
+        /// <returns></returns>
+        private bool InitPassword(DateTime? pwdUpdateTime)
+        {
+            var initPasswordModify = sysConfigService.GetSysConfigByKey("sys.account.initPasswordModify");
+            return initPasswordModify != null && initPasswordModify.ConfigValue == "1" && pwdUpdateTime == null;
+        }
+
+        private bool CheckPasswordExpire(DateTime? pwdUpdateTime)
+        {
+            var passwordExpireDayConfig = sysConfigService.GetSysConfigByKey("sys.account.passwordExpireDay");
+            if (passwordExpireDayConfig != null && int.TryParse(passwordExpireDayConfig.ConfigValue, out int passwordExpireDay) && passwordExpireDay > 0)
+            {
+                if (pwdUpdateTime == null || DateTime.Now > pwdUpdateTime.Value.AddDays(passwordExpireDay))
+                {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 }

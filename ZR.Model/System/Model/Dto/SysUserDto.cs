@@ -32,6 +32,11 @@
 
         public string WelcomeContent { get; set; }
 
+        /// <summary>
+        /// 密码最后更新时间
+        /// </summary>
+        public DateTime? PwdUpdateTime { get; set; }
+
         #region 表额外字段
 
         [SugarColumn(IsIgnore = true)]

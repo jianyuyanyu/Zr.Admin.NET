@@ -78,6 +78,10 @@
         public long DeptId { get; set; }
         public string Province { get; set; }
         public string City { get; set; }
+        /// <summary>
+        /// 最后密码更新时间
+        /// </summary>
+        public DateTime? PwdUpdateTime { get; set; }
 
         [SugarColumn(IsIgnore = true)]
         public bool IsAdmin

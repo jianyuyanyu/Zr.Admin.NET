@@ -226,7 +226,12 @@ namespace ZR.ServiceCore.Services
         /// <returns></returns>
         public int ResetPwd(long userid, string password)
         {
-            return Update(new SysUser() { UserId = userid, Password = password }, it => new { it.Password }, f => f.UserId == userid);
+            return Update(new SysUser()
+            {
+                UserId = userid,
+                Password = password,
+                PwdUpdateTime = DateTime.Now
+            }, it => new { it.Password, it.PwdUpdateTime }, f => f.UserId == userid);
         }
 
         /// <summary>
