@@ -46,7 +46,7 @@ namespace ZR.ServiceCore.SqlSugar
             if (user == null || user.RoleKeys == null) return;
 
             var db = DbScoped.SugarScope.GetConnectionScope(configId);
-            var expUser = Expressionable.Create<SysUser>().And(it => it.DelFlag == 0);
+            var expUser = Expressionable.Create<SysUser>().And(it => it.DelFlag == 0);//有and下面用and
             var expRole = Expressionable.Create<SysRole>();
             var expLoginlog = Expressionable.Create<SysLogininfor>();
             var expSysMsg = Expressionable.Create<SysUserMsg>().And(it => it.IsDelete == 0);
@@ -85,7 +85,7 @@ namespace ZR.ServiceCore.SqlSugar
                 }
                 else if (DataPermiEnum.SELF.Equals(dataScope))//仅本人数据
                 {
-                    expUser.Or(it => it.UserId == user.UserId);
+                    expUser.And(it => it.UserId == user.UserId);
                     expRole.Or(it => user.RoleKeys.Contains(it.RoleKey));
                     expLoginlog.And(it => it.UserName == user.UserName);
                 }
