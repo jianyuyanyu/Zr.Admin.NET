@@ -14,8 +14,21 @@ namespace ZR.ServiceCore.Signalr
 {
     public class MessageHub : Hub
     {
+        #region 静态字段
+
+        /// <summary>
+        /// 在线连接客户端 Key=ConnectionId
+        /// </summary>
         public static readonly ConcurrentDictionary<string, OnlineUsers> OnlineClients = new();
+
+        /// <summary>
+        /// 用户信息缓存 Key=UserId，用于统计今日在线时长
+        /// </summary>
         private static readonly ConcurrentDictionary<long, OnlineUsers> Users = new();
+
+        #endregion
+
+        #region 依赖注入
 
         private readonly ISysNoticeService _sysNoticeService;
         private readonly ISysUserService _userService;
@@ -27,17 +40,25 @@ namespace ZR.ServiceCore.Signalr
             _userService = userService;
             _userOnlineLogService = userOnlineLogService;
         }
-        private ApiResult SendNotice()
-        {
-            var result = _sysNoticeService.GetSysNotices();
 
-            return new ApiResult(200, "success", result);
-        }
+        #endregion
+
+        #region 连接生命周期
+
+        /// <summary>
+        /// 客户端连接
+        /// </summary>
         public override async Task OnConnectedAsync()
         {
             try
             {
                 var context = App.HttpContext;
+
+                // 未认证直接忽略
+                if (context?.User?.Identity?.IsAuthenticated != true) return;
+                // 已存在相同连接忽略
+                if (OnlineClients.ContainsKey(Context.ConnectionId)) return;
+
                 var name = HttpContextExtension.GetName(context);
                 var ip = HttpContextExtension.GetClientUserIp(context);
                 var device = HttpContextExtension.GetClientInfo(context).ToString();
@@ -46,9 +67,6 @@ namespace ZR.ServiceCore.Signalr
                 var clientId = qs.Get("clientId");
                 long userId = HttpContextExtension.GetUId(context);
                 string uuid = $"{device}{userId}{ip}";
-
-                if (!Context.User.Identity.IsAuthenticated || OnlineClients.ContainsKey(Context.ConnectionId))
-                    return;
 
                 var ipInfo = IpTool.Search(ip);
                 var onlineUser = new OnlineUsers(Context.ConnectionId, name, userId, ip, device)
@@ -60,52 +78,73 @@ namespace ZR.ServiceCore.Signalr
                 };
 
                 OnlineClients[Context.ConnectionId] = onlineUser;
-                var userInfo = Users.GetOrAdd(userId, _ => new OnlineUsers { Userid = userId, Name = name, LoginTime = DateTime.Now });
-                UpdateUserOnlineTime(userInfo);
 
-                await Clients.Caller.SendAsync(HubsConstant.MoreNotice, SendNotice());
-                await Clients.All.SendAsync(HubsConstant.OnlineNum, new { num = OnlineClients.Count, OnlineClients });
+                // 更新用户今日在线缓存
+                var userCache = Users.GetOrAdd(userId, _ => new OnlineUsers { Userid = userId, Name = name, LoginTime = DateTime.Now });
+                ResetDailyOnlineTimeIfNeeded(userCache);
+
+                // 推送通知 & 在线人数
+                await Clients.Caller.SendAsync(HubsConstant.MoreNotice, BuildNoticeResult());
+                await BroadcastOnlineUsersAsync();
             }
             catch (Exception ex)
             {
-                Log.WriteLine(ConsoleColor.Red, $"OnConnectedAsync Error: {ex.Message}");
+                Log.WriteLine(ConsoleColor.Red, $"[OnConnectedAsync] Error: {ex.Message}");
             }
         }
 
-        private void UpdateUserOnlineTime(OnlineUsers userInfo)
-        {
-            if (userInfo.LoginTime <= DateTime.Today)
-            {
-                userInfo.LoginTime = DateTime.Now;
-                userInfo.TodayOnlineTime = 0;
-            }
-        }
-
+        /// <summary>
+        /// 客户端断开
+        /// </summary>
         public override async Task OnDisconnectedAsync(Exception exception)
         {
-            if (OnlineClients.TryRemove(Context.ConnectionId, out var user))
+            try
             {
-                if (Users.TryGetValue(user.Userid, out var userInfo))
+                if (!OnlineClients.TryRemove(Context.ConnectionId, out var user)) return;
+
+                if (Users.TryGetValue(user.Userid, out var userCache))
                 {
-                    userInfo.TodayOnlineTime += user.OnlineTime;
-                    await _userOnlineLogService.AddUserOnlineLog(new UserOnlineLog { TodayOnlineTime = Math.Round(userInfo.TodayOnlineTime, 2) }, user);
+                    userCache.TodayOnlineTime += user.OnlineTime;
+                    await _userOnlineLogService.AddUserOnlineLog(
+                        new UserOnlineLog { TodayOnlineTime = Math.Round(userCache.TodayOnlineTime, 2) },
+                        user);
                 }
-                await Clients.All.SendAsync(HubsConstant.OnlineNum, new { num = OnlineClients.Count, OnlineClients, leaveUser = user });
+
+                await Clients.All.SendAsync(HubsConstant.OnlineNum,
+                    new { num = OnlineClients.Count, OnlineClients, leaveUser = user });
+            }
+            catch (Exception ex)
+            {
+                Log.WriteLine(ConsoleColor.Red, $"[OnDisconnectedAsync] Error: {ex.Message}");
             }
         }
 
+        #endregion
+
+        #region Hub 方法
+
+        /// <summary>
+        /// 发送聊天消息
+        /// </summary>
         [HubMethodName("sendMessage")]
         public async Task SendMessage(long toUserId, string message)
         {
             try
             {
-                var userName = HttpContextExtension.GetName(App.HttpContext);
-                long userId = HttpContextExtension.GetUId(App.HttpContext);
-                var fromUser = await _userService.GetByIdAsync(userId);
-                var toUserConnections = OnlineClients.Values.Where(u => u.Userid == toUserId).Select(u => u.ConnnectionId).ToList();
-                toUserConnections.Add(Context.ConnectionId);
+                if (string.IsNullOrWhiteSpace(message)) return;
 
-                ChatMessageDto messageDto = new()
+                var context = App.HttpContext;
+                long userId = HttpContextExtension.GetUId(context);
+                var fromUser = await _userService.GetByIdAsync(userId);
+
+                // 目标用户的所有连接 + 发送者自己
+                var toConnections = OnlineClients.Values
+                    .Where(u => u.Userid == toUserId)
+                    .Select(u => u.ConnnectionId)
+                    .ToList();
+                toConnections.Add(Context.ConnectionId);
+
+                var messageDto = new ChatMessageDto
                 {
                     MsgType = 0,
                     StoredKey = $"{userId}-{toUserId}",
@@ -113,45 +152,97 @@ namespace ZR.ServiceCore.Signalr
                     ChatId = Guid.NewGuid().ToString(),
                     ToUserId = toUserId,
                     Message = message,
-                    Online = toUserConnections.Count > 1 ? 1 : 0,
+                    Online = toConnections.Count > 1 ? 1 : 0,
                     ChatTime = DateTimeHelper.GetUnixTimeSeconds(DateTime.Now),
                     FromUser = fromUser.Adapt<ChatUserDto>()
                 };
 
                 if (messageDto.Online == 0)
                 {
-                    await StoreOfflineMessage(messageDto);
+                    await StoreOfflineMessageAsync(messageDto);
                 }
                 else
                 {
-                    await Clients.Clients(toUserConnections).SendAsync("receiveChat", messageDto);
+                    await Clients.Clients(toConnections).SendAsync("receiveChat", messageDto);
                 }
             }
             catch (Exception ex)
             {
-                Log.WriteLine(ConsoleColor.Red, $"SendMessage Error: {ex.Message}");
+                Log.WriteLine(ConsoleColor.Red, $"[SendMessage] Error: {ex.Message}");
             }
         }
 
-        private Task StoreOfflineMessage(ChatMessageDto message)
-        {
-            Console.WriteLine($"Storing offline message for {message.ToUserId}");
-            return Task.CompletedTask;
-        }
-
+        /// <summary>
+        /// 获取当前连接 ID
+        /// </summary>
         [HubMethodName("getConnId")]
         public string GetConnectId() => Context.ConnectionId;
 
+        /// <summary>
+        /// 单点登录踢出其他设备
+        /// </summary>
         [HubMethodName("logOut")]
         public async Task LogOut()
         {
             var singleLogin = AppSettings.Get<bool>("singleLogin");
+            if (!singleLogin) return;
+
             long userId = HttpContextExtension.GetUId(App.HttpContext);
-            if (singleLogin)
+            var otherConnections = OnlineClients.Values
+                .Where(u => u.Userid == userId && u.ConnnectionId != Context.ConnectionId)
+                .Select(u => u.ConnnectionId)
+                .ToList();
+
+            if (otherConnections.Count > 0)
             {
-                var connections = OnlineClients.Values.Where(u => u.Userid == userId && u.ConnnectionId != Context.ConnectionId).Select(u => u.ConnnectionId).ToList();
-                await Clients.Clients(connections).SendAsync("logOut");
+                await Clients.Clients(otherConnections).SendAsync("logOut");
             }
         }
+
+        #endregion
+
+        #region 私有辅助方法
+
+        /// <summary>
+        /// 构建通知返回结果
+        /// </summary>
+        private ApiResult BuildNoticeResult()
+        {
+            var result = _sysNoticeService.GetSysNotices();
+            return new ApiResult(200, "success", result);
+        }
+
+        /// <summary>
+        /// 广播在线人数
+        /// </summary>
+        private Task BroadcastOnlineUsersAsync()
+        {
+            return Clients.All.SendAsync(HubsConstant.OnlineNum,
+                new { num = OnlineClients.Count, OnlineClients });
+        }
+
+        /// <summary>
+        /// 跨天重置今日在线时长
+        /// </summary>
+        private static void ResetDailyOnlineTimeIfNeeded(OnlineUsers userCache)
+        {
+            if (userCache.LoginTime.Date < DateTime.Today)
+            {
+                userCache.LoginTime = DateTime.Now;
+                userCache.TodayOnlineTime = 0;
+            }
+        }
+
+        /// <summary>
+        /// 存储离线消息（待扩展：持久化到数据库）
+        /// </summary>
+        private static Task StoreOfflineMessageAsync(ChatMessageDto message)
+        {
+            Log.WriteLine(ConsoleColor.Yellow, $"[OfflineMsg] ToUser={message.ToUserId}, Msg={message.Message}");
+            // TODO: 持久化离线消息到数据库
+            return Task.CompletedTask;
+        }
+
+        #endregion
     }
 }

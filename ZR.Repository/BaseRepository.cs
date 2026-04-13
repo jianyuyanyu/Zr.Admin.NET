@@ -153,44 +153,42 @@ namespace ZR.Repository
         }
         #endregion update
 
+        /// <summary>
+        /// 使用事务（单库）
+        /// </summary>
         public DbResult<bool> UseTran(Action action)
         {
             try
             {
-                var result = Context.Ado.UseTran(() => action());
-                return result;
+                return Context.Ado.UseTran(() => action());
             }
             catch (Exception ex)
             {
                 Context.Ado.RollbackTran();
-                Console.WriteLine(ex.Message);
+                Log.WriteLine(ConsoleColor.Red, $"[UseTran] Error: {ex.Message}");
                 throw;
             }
         }
 
         /// <summary>
-        /// 
+        /// 使用事务（多库/多租户）
         /// </summary>
-        /// <param name="client"></param>
-        /// <param name="action">增删改查方法</param>
-        /// <returns></returns>
         public DbResult<bool> UseTran(ISqlSugarClient client, Action action)
         {
             try
             {
-                var result = client.AsTenant().UseTran(() => action());
-                return result;
+                return client.AsTenant().UseTran(() => action());
             }
             catch (Exception ex)
             {
-                Console.WriteLine("事务异常" + ex.Message);
                 client.AsTenant().RollbackTran();
+                Log.WriteLine(ConsoleColor.Red, $"[UseTran] 事务异常: {ex.Message}");
                 throw;
             }
         }
 
         /// <summary>
-        /// 使用事务
+        /// 使用事务，返回是否成功
         /// </summary>
         /// <param name="action"></param>
         /// <returns></returns>
