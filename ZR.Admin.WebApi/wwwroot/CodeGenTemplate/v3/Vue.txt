@@ -661,9 +661,9 @@ const state = reactive({
   rules: {
 $foreach(column in genTable.Columns)
 $if(column.IsRequired && column.IsPk && replaceDto.useSnowflakeId)
-    ${column.CsharpFieldFl}: [{ required: true, message: "${column.ColumnComment}不能为空", trigger: $if(column.htmlType == "select")"change"$else"blur"$end }],
+    ${column.CsharpFieldFl}: [{ required: true, message: "${column.ColumnComment}不能为空", trigger: $if(column.HtmlType == "select")"change"$else"blur"$end }],
 $elseif(column.IsRequired && column.IsIncrement == false)
-    ${column.CsharpFieldFl}$if(column.HtmlType == "selectMulti")Checked$end: [{ required: true, message: "${column.ColumnComment}不能为空", trigger: $if(column.htmlType == "select")"change"$else"blur"$end
+    ${column.CsharpFieldFl}$if(column.HtmlType == "selectMulti")Checked$end: [{ required: true, message: "${column.ColumnComment}不能为空", trigger: $if(column.HtmlType == "select")"change"$else"blur"$end
     $if(column.CsharpType == "int" || column.CsharpType == "long"), type: "number" $end }],
 $end
 $end
