@@ -26,6 +26,11 @@
         public string LoginIP { get; set; }
 
         /// <summary>
+        /// 最后登录时间
+        /// </summary>
+        public DateTime? LoginDate { get; set; }
+
+        /// <summary>
         /// 部门Id
         /// </summary>
         public long DeptId { get; set; }
@@ -36,6 +41,11 @@
         /// 密码最后更新时间
         /// </summary>
         public DateTime? PwdUpdateTime { get; set; }
+        
+        public DateTime? Create_time { get; set; }
+        public string Create_by { get; set; }
+        public DateTime? Update_time { get; set; }
+        public string Update_by { get; set; }
 
         #region 表额外字段
 

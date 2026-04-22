@@ -78,6 +78,10 @@
         /// 翻译key
         /// </summary>
         public string MenuNameKey { get; set; }
+        /// <summary>
+        /// 参数标签
+        /// </summary>
+        public bool TagByQuery { get; set; }
         public List<MenuDto> Children { get; set; } = new List<MenuDto>();
     }
 

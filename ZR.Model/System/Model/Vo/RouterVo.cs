@@ -72,6 +72,11 @@
         /// 权限字符
         /// </summary>
         public string Permi { get; set; }
+        /// <summary>
+        /// 标签页多开，开启后路由可打开多个标签页，默认false
+        /// </summary>
+        public bool TagByQuery { get; set; }
+
         public Meta(string title, string icon)
         {
             Title = title;
@@ -83,12 +88,13 @@
             Icon = icon;
             Link = path;
         }
-        public Meta(string title, string icon, bool noCache, string titleKey, string path, DateTime addTime)
+        public Meta(string title, string icon, bool noCache, string titleKey, string path, DateTime addTime, bool tagByQuery = false)
         {
             Title = title;
             Icon = icon;
             NoCache = noCache;
             TitleKey = titleKey;
+            TagByQuery = tagByQuery;
             if (!string.IsNullOrEmpty(path) && (path.StartsWith(UserConstants.HTTP) || path.StartsWith(UserConstants.HTTPS)))
             {
                 Link = path;

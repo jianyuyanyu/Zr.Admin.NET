@@ -115,5 +115,6 @@
         /// 路由名
         /// </summary>
         public string RouteName { get; set; }
+        public bool TagByQuery { get; set; }
     }
 }

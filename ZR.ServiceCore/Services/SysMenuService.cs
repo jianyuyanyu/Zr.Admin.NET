@@ -388,7 +388,7 @@ namespace ZR.ServiceCore.Services
                     Name = GetRouteName(menu),
                     Path = GetRoutePath(menu),
                     Component = GetComponent(menu),
-                    Meta = new Meta(menu.MenuName, menu.Icon, "1".Equals(menu.IsCache), menu.MenuNameKey, menu.Path, menu.Create_time)
+                    Meta = new Meta(menu.MenuName, menu.Icon, "1".Equals(menu.IsCache), menu.MenuNameKey, menu.Path, menu.Create_time, menu.TagByQuery)
                 };
 
                 List<SysMenu> cMenus = menu.Children;
@@ -409,7 +409,7 @@ namespace ZR.ServiceCore.Services
                         Path = menu.Path,
                         Component = menu.Component,
                         Name = menu.RouteName.IsNotEmpty() ? menu.RouteName : menu.Path.ToLower(),
-                        Meta = new Meta(menu.MenuName, menu.Icon, "1".Equals(menu.IsCache), menu.MenuNameKey, menu.Path, menu.Create_time)
+                        Meta = new Meta(menu.MenuName, menu.Icon, "1".Equals(menu.IsCache), menu.MenuNameKey, menu.Path, menu.Create_time, menu.TagByQuery)
                     };
                     childrenList.Add(children);
                     router.Children = childrenList;
