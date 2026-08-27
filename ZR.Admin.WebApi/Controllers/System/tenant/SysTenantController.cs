@@ -154,6 +154,18 @@ namespace ZR.Admin.WebApi.Controllers.System.tenant
                 return ToResponse(ApiResult.Error("租户标识不能为空"));
             }
 
+            // TenantId 对应 dbConfigs[].ConfigId，创建后禁止修改，防止断开与租户库的绑定；
+            // 该校验同时保护默认租户（主库标识）不被篡改。
+            var existingTenant = _sysTenantService.GetFirst(x => x.Id == dto.Id && x.DelFlag == 0);
+            if (existingTenant == null)
+            {
+                return ToResponse(ApiResult.Error("租户不存在"));
+            }
+            if (!string.Equals(existingTenant.TenantId, dto.TenantId.Trim(), StringComparison.OrdinalIgnoreCase))
+            {
+                return ToResponse(ApiResult.Error($"租户标识不允许修改（当前为[{existingTenant.TenantId}]）"));
+            }
+
             var model = dto.Adapt<SysTenant>().ToUpdate(HttpContext);
             if (UserConstants.NOT_UNIQUE.Equals(_sysTenantService.CheckTenantIdUnique(model)))
             {
@@ -206,7 +218,15 @@ namespace ZR.Admin.WebApi.Controllers.System.tenant
 
             model.Status = status;
             model = model.ToUpdate(HttpContext);
-            return SUCCESS(_sysTenantService.Update(model, it => new { it.Status, it.Update_by, it.Update_time }));
+            var response = _sysTenantService.Update(model, it => new { it.Status, it.Update_by, it.Update_time });
+
+            // 停用租户后立即通知其在线用户下线，避免已发放的 token 在自然过期前仍可继续操作
+            if (status == 1)
+            {
+                _sysTenantService.KickTenantOnlineUsers(model.TenantId, "您的租户已被停用，请联系平台管理员");
+            }
+
+            return SUCCESS(response);
         }
 
         /// <summary>

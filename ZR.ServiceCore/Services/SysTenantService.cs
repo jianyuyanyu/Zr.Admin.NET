@@ -1,6 +1,7 @@
 using Infrastructure;
 using Infrastructure.Attribute;
 using Infrastructure.Model;
+using Microsoft.AspNetCore.SignalR;
 using MiniExcelLibs;
 using System.Text;
 using ZR.Common;
@@ -11,6 +12,7 @@ using ZR.Model.social;
 using ZR.Model.System;
 using ZR.Model.System.Dto;
 using ZR.Model.System.Tenant;
+using ZR.ServiceCore.Signalr;
 
 namespace ZR.ServiceCore.Services
 {
@@ -22,13 +24,16 @@ namespace ZR.ServiceCore.Services
     {
         private readonly IEnumerable<ITenantModuleInitializer> _moduleInitializers;
         private readonly ISysUserMsgService _sysUserMsgService;
+        private readonly IHubContext<MessageHub> _hubContext;
 
         public SysTenantService(
             IEnumerable<ITenantModuleInitializer> moduleInitializers,
-            ISysUserMsgService sysUserMsgService)
+            ISysUserMsgService sysUserMsgService,
+            IHubContext<MessageHub> hubContext)
         {
             _moduleInitializers = moduleInitializers ?? Enumerable.Empty<ITenantModuleInitializer>();
             _sysUserMsgService = sysUserMsgService;
+            _hubContext = hubContext;
         }
 
         /// <summary>
@@ -366,6 +371,8 @@ namespace ZR.ServiceCore.Services
             var suspendReason = string.IsNullOrEmpty(remark) ? "" : $"，原因：{remark}";
             SendTenantAdminMessage(normalizedTenantId, $"您的租户已暂停服务{suspendReason}，如有疑问请联系平台管理员。");
 
+            var kicked = KickTenantOnlineUsers(normalizedTenantId, $"您的租户已暂停服务{suspendReason}，请重新登录或联系平台管理员");
+            AppendStep(result, "kick-online-users", true, $"已通知{kicked}个在线连接强制下线");
             AppendStep(result, "disable-login", true, "租户状态已切换为停用");
             result.Success = true;
             result.Message = "租户停服完成";
@@ -417,6 +424,22 @@ namespace ZR.ServiceCore.Services
             tenant.Update_by = operatorName;
             tenant.Update_time = DateTime.Now;
             Update(tenant, it => new { it.ExpireTime, it.Status, it.Remark, it.Update_by, it.Update_time });
+
+            // 同步当前生效的套餐绑定有效期：绑定EndTime原随开通时的ExpireTime写入，
+            // 若不联动会在旧时间点失配，导致 ResolveActiveTenantPlanBinding 匹配失败静默回落默认套餐。
+            var bindingRows = Context.Updateable<SysTenantPlanBinding>()
+                .SetColumns(x => new SysTenantPlanBinding
+                {
+                    EndTime = newExpireTime,
+                    Update_by = operatorName,
+                    Update_time = DateTime.Now
+                })
+                .Where(x => x.TenantId == tenantId && x.DelFlag == 0 && x.Status == 0)
+                .ExecuteCommand();
+            if (bindingRows > 0)
+            {
+                AppendStep(result, "sync-plan-binding", true, $"已同步{bindingRows}条套餐绑定有效期至{newExpireTime:yyyy-MM-dd HH:mm:ss}");
+            }
 
             SendTenantAdminMessage(tenantId, $"您的租户已续费成功，服务已恢复，到期时间更新为{newExpireTime:yyyy-MM-dd}。");
 
@@ -474,10 +497,44 @@ namespace ZR.ServiceCore.Services
                 AppendStep(result, "disable-tenant", true, "租户已停服（保留记录）");
             }
 
+            var kicked = KickTenantOnlineUsers(tenantId, "您的租户已注销下线，如有疑问请联系平台管理员");
+            AppendStep(result, "kick-online-users", true, $"已通知{kicked}个在线连接强制下线");
+
             RemoveDomainMapCache();
             result.Success = true;
             result.Message = "租户删除完成";
             return result;
+        }
+
+        /// <summary>
+        /// 踢出指定租户全部在线用户：按 MessageHub.OnlineClients 过滤该租户连接并发送强退通知。
+        /// 推送失败仅记日志，不影响停服/注销主流程。
+        /// </summary>
+        public int KickTenantOnlineUsers(string tenantId, string reason)
+        {
+            if (string.IsNullOrWhiteSpace(tenantId)) return 0;
+
+            try
+            {
+                var connIds = MessageHub.OnlineClients.Values
+                    .Where(u => string.Equals(u.TenantId, tenantId.Trim(), StringComparison.OrdinalIgnoreCase))
+                    .Select(u => u.ConnnectionId)
+                    .ToList();
+
+                if (connIds.Count == 0) return 0;
+
+                _hubContext.Clients.Clients(connIds)
+                    .SendAsync(HubsConstant.ForceUser, new { Reason = reason })
+                    .GetAwaiter().GetResult();
+
+                Log.WriteLine(ConsoleColor.Yellow, $"[SysTenantService] 已向租户[{tenantId}]推送强退通知，连接数: {connIds.Count}");
+                return connIds.Count;
+            }
+            catch (Exception ex)
+            {
+                Log.WriteLine(ConsoleColor.Red, $"[SysTenantService] 租户[{tenantId}]在线用户强退通知失败: {ex.Message}");
+                return 0;
+            }
         }
 
         public List<TenantPlanDto> GetTenantPlanList()
@@ -572,6 +629,8 @@ namespace ZR.ServiceCore.Services
             Context.Deleteable<SysTenantPlanMenu>()
                 .Where(x => x.PlanCode == plan.PlanCode)
                 .ExecuteCommand();
+
+            ClearTenantPlanPermsCache(plan.PlanCode);
 
             return 1;
         }
@@ -669,6 +728,7 @@ namespace ZR.ServiceCore.Services
                 Create_time = DateTime.Now
             }).ExecuteCommand();
 
+            CacheHelper.Remove($"tenant:plan:perms:{tenantId}");
             SendTenantAdminMessage(tenantId, "您的租户套餐已变更，相关功能权限已同步更新。");
 
             return GetCurrentTenantPlan(tenantId);
@@ -888,6 +948,26 @@ namespace ZR.ServiceCore.Services
             if (!App.IsTenantEnabled())
             {
                 throw new CustomException("当前未启用多租户功能（UseTenant != 1）");
+            }
+        }
+
+        /// <summary>
+        /// 清除绑定指定套餐的所有租户的套餐权限缓存（key 与 SysTenantPlanMenuService.GetPermsByTenantId 保持一致）。
+        /// 套餐删除/菜单变更后调用，避免权限判定沿用旧缓存。
+        /// </summary>
+        private void ClearTenantPlanPermsCache(string planCode)
+        {
+            if (string.IsNullOrWhiteSpace(planCode)) return;
+
+            var tenantIds = Context.Queryable<SysTenantPlanBinding>()
+                .Where(x => x.PlanCode == planCode && x.DelFlag == 0)
+                .Select(x => x.TenantId)
+                .Distinct()
+                .ToList();
+
+            foreach (var tid in tenantIds)
+            {
+                CacheHelper.Remove($"tenant:plan:perms:{tid}");
             }
         }
 

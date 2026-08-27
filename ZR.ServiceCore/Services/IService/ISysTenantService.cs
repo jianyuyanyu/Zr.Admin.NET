@@ -100,6 +100,15 @@ namespace ZR.ServiceCore.Services
 		TenantLifecycleResult DecommissionTenant(TenantDecommissionDto dto, string operatorName);
 
 		/// <summary>
+		/// 踢出指定租户全部在线用户（按 MessageHub.OnlineClients 过滤该租户连接并发送强退通知）。
+		/// 供停服/注销/停用后调用，推送失败仅记日志不影响主流程。返回通知到的连接数。
+		/// </summary>
+		/// <param name="tenantId">租户标识</param>
+		/// <param name="reason">强退原因，展示给被踢用户</param>
+		/// <returns></returns>
+		int KickTenantOnlineUsers(string tenantId, string reason);
+
+		/// <summary>
 		/// 套餐列表。
 		/// </summary>
 		/// <returns></returns>
