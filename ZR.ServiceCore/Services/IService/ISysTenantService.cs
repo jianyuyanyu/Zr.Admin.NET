@@ -180,5 +180,21 @@ namespace ZR.ServiceCore.Services
         /// <param name="withinDays"></param>
         /// <returns></returns>
         List<TenantExpireReminderDto> GetTenantExpireReminders(int withinDays = 30);
+
+        /// <summary>
+        /// 向全部/指定启用租户的管理员群发公告站内信。返回实际发送的租户数。
+        /// </summary>
+        /// <param name="dto">TenantIds 为空表示全部启用租户</param>
+        /// <param name="operatorName"></param>
+        /// <returns></returns>
+        int BroadcastToTenants(TenantBroadcastDto dto, string operatorName);
+
+        /// <summary>
+        /// 到期前阶梯提醒：扫描启用且未过期的租户，在剩余天数命中 30/15/7/3/1 天阶梯时
+        /// 向租户管理员推送站内信提醒。以 Remark 打标防同阶段重复发送。供定时任务调用。
+        /// </summary>
+        /// <param name="operatorName">操作人，默认 system（定时任务）</param>
+        /// <returns>本次发送提醒的租户数量</returns>
+        int RemindExpiringTenants(string operatorName = "system");
     }
 }

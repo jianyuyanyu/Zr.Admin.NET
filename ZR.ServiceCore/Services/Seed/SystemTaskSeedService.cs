@@ -40,6 +40,37 @@ namespace ZR.ServiceCore.Services
         }
 
         /// <summary>
+        /// 确保"租户到期前提醒"系统任务存在（幂等，直接查库判断）。
+        /// 每日 9 点执行，对即将到期租户按 30/15/7/3/1 天阶梯发站内信（Remark 打标防重）。
+        /// </summary>
+        public string EnsureTenantExpireRemindTaskSeedData()
+        {
+            var mainTenantId = App.MainDbConfigId;
+            var db = DbScoped.SugarScope.GetConnectionScope(mainTenantId);
+
+            if (db.Queryable<SysTasks>().ClearFilter().Any(x => x.ID == "20260827000001"))
+                return "[系统任务] 租户到期前提醒已存在，跳过";
+
+            db.Insertable(new SysTasks
+            {
+                ID = "20260827000001",
+                Name = "租户到期前提醒",
+                JobGroup = "system",
+                Cron = "0 0 9 * * ?",
+                AssemblyName = "ZR.ServiceCore",
+                ClassName = "Job_TenantExpireRemind",
+                TriggerType = 1,
+                IntervalSecond = 0,
+                IsStart = 1,
+                TaskType = 1,
+                TenantId = mainTenantId,
+                Create_by = "system"
+            }).ExecuteCommand();
+
+            return "[系统任务] 写入租户到期前提醒";
+        }
+
+        /// <summary>
         /// 确保"工作流超时自动处理"系统任务存在（幂等，直接查库判断）。
         /// 工作流数据在租户库，TenantId 设 "*" 由 Job_Dispatcher 按所有启用租户展开执行，
         /// 每个租户上下文内扫描超时待办并自动通过/驳回/转交。默认每 5 分钟（Cron 0 0/5 * * * ?）。

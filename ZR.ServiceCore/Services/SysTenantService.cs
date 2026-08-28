@@ -224,15 +224,40 @@ namespace ZR.ServiceCore.Services
                 result.Steps.AddRange(initResult.Steps);
             }
 
+            // 套餐分配：TrialDays>0 时开通即试用 Pro（到期后自动回落默认套餐），否则按默认套餐
+            var planCode = GetDefaultPlanCode();
+            var planEndTime = dto.ExpireTime;
+            var planRemark = "开通时自动分配默认套餐";
+            if (dto.TrialDays is > 0)
+            {
+                if (dto.TrialDays > 365)
+                {
+                    throw new CustomException("试用期天数不能超过365天");
+                }
+
+                var trialPlan = GetPlanByCode("pro");
+                if (trialPlan != null && trialPlan.Status == 0)
+                {
+                    planCode = "pro";
+                    planRemark = $"开通试用Pro套餐{dto.TrialDays}天，期满自动回落默认套餐";
+                }
+                else
+                {
+                    planRemark = $"未配置可用Pro套餐，试用{dto.TrialDays}天改为默认套餐";
+                }
+                planEndTime = DateTime.Now.AddDays(dto.TrialDays.Value);
+            }
+
             AssignTenantPlan(new TenantPlanAssignDto
             {
                 TenantId = tenantId,
-                PlanCode = GetDefaultPlanCode(),
+                PlanCode = planCode,
                 StartTime = DateTime.Now,
-                EndTime = dto.ExpireTime,
-                Remark = "开通时自动分配默认套餐"
+                EndTime = planEndTime,
+                Remark = planRemark
             }, operatorName);
-            AppendStep(result, "assign-plan", true, "已分配默认套餐free");
+            AppendStep(result, "assign-plan", true,
+                dto.TrialDays is > 0 ? $"已分配套餐[{planCode}]，试用期至{planEndTime:yyyy-MM-dd}" : "已分配默认套餐free");
 
             result.Success = true;
             result.Message = "租户开通完成";
@@ -855,6 +880,92 @@ namespace ZR.ServiceCore.Services
             }
 
             return count;
+        }
+
+        /// <summary>
+        /// 向全部/指定启用租户的管理员群发公告站内信。
+        /// 指定 TenantIds 时仅发送其中存在且启用的租户；为空时发送全部启用租户。
+        /// </summary>
+        public int BroadcastToTenants(TenantBroadcastDto dto, string operatorName)
+        {
+            EnsureTenantFeatureEnabled();
+
+            if (dto == null || string.IsNullOrWhiteSpace(dto.Content))
+            {
+                throw new CustomException("公告内容不能为空");
+            }
+
+            var targets = Queryable()
+                .Where(x => x.DelFlag == 0 && x.Status == 0)
+                .ToList();
+            if (dto.TenantIds is { Count: > 0 })
+            {
+                var idSet = new HashSet<string>(dto.TenantIds.Where(t => !string.IsNullOrWhiteSpace(t)).Select(t => t.Trim()), StringComparer.OrdinalIgnoreCase);
+                targets = targets.Where(x => idSet.Contains(x.TenantId)).ToList();
+            }
+
+            var content = $"[平台公告]{dto.Content.Trim()}";
+            foreach (var tenant in targets)
+            {
+                SendTenantAdminMessage(tenant.TenantId, content);
+            }
+
+            Log.WriteLine(ConsoleColor.Cyan, $"[SysTenantService] 租户公告群发完成：操作人 {operatorName}，发送 {targets.Count} 个租户");
+            return targets.Count;
+        }
+
+        /// <summary>
+        /// 到期阶梯提醒标记前缀。完整格式 [expire-remind:{到期日yyyyMMdd}-{剩余天数}d]，
+        /// 写入租户 Remark 用于幂等去重：同一到期日的同一阶段只提醒一次。
+        /// </summary>
+        private const string ExpireRemindMarkPrefix = "[expire-remind:";
+
+        private static readonly int[] ExpireRemindStages = [30, 15, 7, 3, 1];
+
+        public int RemindExpiringTenants(string operatorName = "system")
+        {
+            EnsureTenantFeatureEnabled();
+
+            var now = DateTime.Now;
+            var maxStage = ExpireRemindStages.Max();
+            var candidates = Queryable()
+                .Where(x => x.DelFlag == 0 && x.Status == 0
+                    && x.ExpireTime != null && x.ExpireTime >= now && x.ExpireTime <= now.AddDays(maxStage))
+                .ToList();
+
+            var sent = 0;
+            foreach (var tenant in candidates)
+            {
+                if (string.Equals(tenant.TenantId, App.MainDbConfigId, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var daysLeft = (int)Math.Ceiling((tenant.ExpireTime.Value - now).TotalDays);
+                var stage = ExpireRemindStages.FirstOrDefault(s => daysLeft <= s);
+                if (stage == 0)
+                {
+                    continue;
+                }
+
+                // 同一到期日+同一阶段只提醒一次；续费改变到期日后开启新一轮提醒
+                var mark = $"{ExpireRemindMarkPrefix}{tenant.ExpireTime.Value:yyyyMMdd}-{stage}d]";
+                if (tenant.Remark != null && tenant.Remark.Contains(mark, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                SendTenantAdminMessage(tenant.TenantId,
+                    $"您的租户将于{stage}天后（{tenant.ExpireTime.Value:yyyy-MM-dd}）到期，到期后服务将自动暂停，请及时联系平台管理员续费。");
+
+                tenant.Remark = string.IsNullOrWhiteSpace(tenant.Remark) ? mark : $"{tenant.Remark}{mark}";
+                tenant.Update_by = operatorName;
+                tenant.Update_time = now;
+                Update(tenant, it => new { it.Remark, it.Update_by, it.Update_time });
+                sent++;
+            }
+
+            return sent;
         }
 
         public List<TenantExpireReminderDto> GetTenantExpireReminders(int withinDays = 30)

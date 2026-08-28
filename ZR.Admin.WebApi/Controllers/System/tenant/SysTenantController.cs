@@ -33,7 +33,7 @@ namespace ZR.Admin.WebApi.Controllers.System.tenant
         }
 
         /// <summary>
-        /// 查询租户到期提醒。
+        /// 租户到期提醒。
         /// </summary>
         /// <param name="withinDays"></param>
         /// <returns></returns>
@@ -42,6 +42,25 @@ namespace ZR.Admin.WebApi.Controllers.System.tenant
         public IActionResult ExpireReminders(int withinDays = 30)
         {
             return SUCCESS(_sysTenantService.GetTenantExpireReminders(withinDays));
+        }
+
+        /// <summary>
+        /// 租户公告群发（发给目标租户管理员的站内信）。
+        /// </summary>
+        /// <param name="dto"></param>
+        /// <returns></returns>
+        [HttpPost("broadcast")]
+        [ActionPermissionFilter(Permission = "system:tenant:broadcast")]
+        [Log(Title = "租户公告", BusinessType = BusinessType.INSERT)]
+        public IActionResult Broadcast([FromBody] TenantBroadcastDto dto)
+        {
+            if (dto == null || string.IsNullOrWhiteSpace(dto.Content))
+            {
+                throw new CustomException("公告内容不能为空");
+            }
+
+            var sent = _sysTenantService.BroadcastToTenants(dto, HttpContext.GetName());
+            return SUCCESS(new { Sent = sent });
         }
 
         /// <summary>

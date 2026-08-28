@@ -67,6 +67,27 @@ namespace ZR.Model.System.Dto
         public bool InitializeNow { get; set; } = true;
         public bool SeedFromMain { get; set; } = true;
         public bool EnableAfterInit { get; set; } = true;
+        /// <summary>
+        /// 试用期天数（1~365）。>0 时开通即分配 Pro 套餐并在试用期满后自动回落默认套餐，
+        /// 不影响租户本身的有效期。
+        /// </summary>
+        public int? TrialDays { get; set; }
+    }
+
+    /// <summary>
+    /// 租户公告群发请求。TenantIds 为空时发送给全部启用租户的管理员。
+    /// </summary>
+    public class TenantBroadcastDto
+    {
+        /// <summary>
+        /// 目标租户标识列表。为空表示全部启用租户。
+        /// </summary>
+        public List<string> TenantIds { get; set; }
+
+        /// <summary>
+        /// 公告内容。
+        /// </summary>
+        public string Content { get; set; }
     }
 
     /// <summary>

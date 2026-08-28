@@ -90,7 +90,8 @@ namespace ZR.ServiceCore.Services.Seed
                 ("查询", "system:tenant:query", 1),
                 ("新增", "system:tenant:add", 2),
                 ("修改", "system:tenant:update", 3),
-                ("删除", "system:tenant:remove", 4)
+                ("删除", "system:tenant:remove", 4),
+                ("发布公告", "system:tenant:broadcast", 5)
             };
 
             var insertedMenus = 0;
