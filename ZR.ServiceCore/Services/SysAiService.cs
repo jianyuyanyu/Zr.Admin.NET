@@ -2,6 +2,7 @@ using Infrastructure;
 using Infrastructure.Attribute;
 using Infrastructure.Helper;
 using Infrastructure.Model;
+using System.Globalization;
 using System.Text.Json;
 using ZR.Model.Models;
 using ZR.Model.System.Dto;
@@ -25,14 +26,19 @@ namespace ZR.ServiceCore.Services
         /// <summary>语言代码长度上限，对齐 sys_common_lang.lang_code 列长</summary>
         private const int LangCodeMaxLength = 10;
 
+        /// <summary>周报允许参与汇总的日程上限，超出只取前 N 条，避免撑爆上下文</summary>
+        private const int MaxWeeklyReportItems = 100;
+
         private readonly ICommonLangService _commonLangService;
+        private readonly IDailyScheduleService _dailyScheduleService;
 
         private static readonly PromptLoader PromptLoader =
             new(AppSettings.Get<AiOptions>("AiOptions")?.PromptDir);
 
-        public SysAiService(ICommonLangService commonLangService)
+        public SysAiService(ICommonLangService commonLangService, IDailyScheduleService dailyScheduleService)
         {
             _commonLangService = commonLangService;
+            _dailyScheduleService = dailyScheduleService;
         }
 
         public async Task<SysAiLangTranslateResult> TranslateLangAsync(SysAiLangTranslateInput input)
@@ -142,6 +148,80 @@ namespace ZR.ServiceCore.Services
             return ParseCronResult(reply);
         }
 
+        public async Task<SysAiScheduleParseResult> ParseScheduleAsync(SysAiScheduleParseInput input)
+        {
+            var text = input?.Text?.Trim();
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                throw new Exception("请先描述日程内容，例如「下周三下午三点前把季度报表发给张总，加急」");
+            }
+            if (text.Length > 500)
+            {
+                throw new Exception("描述过长，请精简到 500 字以内");
+            }
+
+            // 相对时间（明天/下周三）只有服务端知道基准，必须注入，否则 AI 会按自己的日期认知乱算
+            var now = DateTime.Now;
+            var user = $"currentTime：{now:yyyy-MM-dd HH:mm}（星期{GetCnWeekday(now.DayOfWeek)}）\nweekStart：1\ntext：{text}";
+
+            var reply = await ChatSafeAsync(GetPromptOrThrow("system/schedule-parse.md", "日程解析"), user).ConfigureAwait(false);
+            return ParseScheduleResult(reply);
+        }
+
+        public async Task<SysAiWeeklyReportResult> GenerateWeeklyReportAsync(SysAiWeeklyReportInput input, long userId)
+        {
+            var (begin, end) = ResolveReportRange(input);
+            var schedules = _dailyScheduleService.GetByDateRange(userId, begin, end)
+                .Take(MaxWeeklyReportItems + 1)
+                .ToList();
+
+            var result = new SysAiWeeklyReportResult
+            {
+                PeriodStart = begin.ToString("yyyy-MM-dd"),
+                PeriodEnd = end.ToString("yyyy-MM-dd"),
+                Total = schedules.Count
+            };
+
+            if (schedules.Count == 0)
+            {
+                result.Summary = "本期无日程记录，无需生成周报。";
+                return result;
+            }
+
+            var truncated = schedules.Count > MaxWeeklyReportItems;
+            if (truncated)
+            {
+                schedules = schedules.Take(MaxWeeklyReportItems).ToList();
+            }
+
+            var payload = new
+            {
+                periodStart = begin.ToString("yyyy-MM-dd"),
+                periodEnd = end.ToString("yyyy-MM-dd"),
+                schedules = schedules.Select(x => new
+                {
+                    title = Clip(x.Title, 100),
+                    content = Clip(x.Content ?? string.Empty, 500),
+                    status = x.Status,
+                    priority = x.Priority,
+                    dueTime = x.DueTime?.ToString("yyyy-MM-dd HH:mm") ?? string.Empty
+                }).ToList()
+            };
+
+            var user = System.Text.Json.JsonSerializer.Serialize(payload);
+            if (truncated)
+            {
+                user += $"\n（日程较多，仅提供前 {MaxWeeklyReportItems} 条，汇总时请说明数据已截断）";
+            }
+
+            var reply = await ChatSafeAsync(GetPromptOrThrow("system/schedule-weekly-report.md", "周报汇总"), user).ConfigureAwait(false);
+            var parsed = ParseWeeklyReportResult(reply);
+            parsed.PeriodStart = result.PeriodStart;
+            parsed.PeriodEnd = result.PeriodEnd;
+            parsed.Total = result.Total;
+            return parsed;
+        }
+
         /// <summary>
         /// 组装翻译请求正文：用 JSON 承载条目，避免多行文本在换行/引号上与提示词混淆。
         /// </summary>
@@ -229,6 +309,151 @@ namespace ZR.ServiceCore.Services
                 result.Entries.Add(entry);
             }
             return result;
+        }
+
+        /// <summary>
+        /// 解析日程草稿。时间字段只接受 yyyy-MM-dd HH:mm，解析失败一律置空，
+        /// 宁可让用户手填也不写入错误时间。
+        /// </summary>
+        private static SysAiScheduleParseResult ParseScheduleResult(string raw)
+        {
+            var result = new SysAiScheduleParseResult();
+            if (string.IsNullOrWhiteSpace(raw)) return result;
+
+            var json = JsonHelper.StripMarkdown(raw);
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+                if (root.ValueKind != JsonValueKind.Object)
+                {
+                    result.Raw = raw.Trim();
+                    return result;
+                }
+
+                result.Title = (ReadString(root, "title") ?? string.Empty).Trim();
+                result.Content = (ReadString(root, "content") ?? string.Empty).Trim();
+                result.Warnings = (ReadString(root, "warnings") ?? string.Empty).Trim();
+
+                if (root.TryGetProperty("priority", out var priEl))
+                {
+                    if (priEl.ValueKind == JsonValueKind.Number && priEl.TryGetInt32(out var p) && p >= 1 && p <= 3)
+                    {
+                        result.Priority = p;
+                    }
+                }
+
+                result.DueTime = ParseDateTimeText(ReadString(root, "dueTime"));
+                result.ReminderTime = ParseDateTimeText(ReadString(root, "reminderTime"));
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                result.Raw = raw.Trim();
+            }
+            return result;
+        }
+
+        private static SysAiWeeklyReportResult ParseWeeklyReportResult(string raw)
+        {
+            var result = new SysAiWeeklyReportResult();
+            if (string.IsNullOrWhiteSpace(raw)) return result;
+
+            var json = JsonHelper.StripMarkdown(raw);
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+                if (root.ValueKind != JsonValueKind.Object)
+                {
+                    result.Raw = raw.Trim();
+                    return result;
+                }
+
+                result.Summary = (ReadString(root, "summary") ?? string.Empty).Trim();
+                result.Completed = ReadStringArray(root, "completed");
+                result.Pending = ReadStringArray(root, "pending");
+                result.Risks = ReadStringArray(root, "risks");
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                result.Raw = raw.Trim();
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// 解析 AI 返回的时间文本。只认 yyyy-MM-dd HH:mm 与 yyyy-MM-dd 两种格式，
+        /// 其它格式（含自然语言）一律返回空，避免脏时间入库。
+        /// </summary>
+        private static string ParseDateTimeText(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+            var text = value.Trim();
+
+            string[] formats = { "yyyy-MM-dd HH:mm", "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd" };
+            if (!DateTime.TryParseExact(text, formats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt))
+            {
+                return string.Empty;
+            }
+            return dt.ToString("yyyy-MM-dd HH:mm");
+        }
+
+        private static List<string> ReadStringArray(JsonElement root, string name)
+        {
+            var list = new List<string>();
+            if (!root.TryGetProperty(name, out var arr) || arr.ValueKind != JsonValueKind.Array) return list;
+
+            foreach (var el in arr.EnumerateArray())
+            {
+                if (el.ValueKind != JsonValueKind.String) continue;
+                var v = el.GetString();
+                if (!string.IsNullOrWhiteSpace(v)) list.Add(v.Trim());
+            }
+            return list;
+        }
+
+        /// <summary>
+        /// 确定周报统计区间。未传时间默认取本周（周一 00:00 至周日 23:59:59）。
+        /// 只传其一则另一边开放到当天；起止倒置时自动交换，避免查出空集让用户困惑。
+        /// </summary>
+        private static (DateTime, DateTime) ResolveReportRange(SysAiWeeklyReportInput input)
+        {
+            var begin = input?.BeginTime;
+            var end = input?.EndTime;
+
+            if (!begin.HasValue && !end.HasValue)
+            {
+                var today = DateTime.Today;
+                // DayOfWeek: 周日=0，这里换算成以周一为一周起点的偏移
+                var offset = (int)today.DayOfWeek == 0 ? 6 : (int)today.DayOfWeek - 1;
+                var monday = today.AddDays(-offset);
+                return (monday, monday.AddDays(7).AddSeconds(-1));
+            }
+
+            if (begin.HasValue && end.HasValue)
+            {
+                return begin.Value <= end.Value
+                    ? (begin.Value, end.Value)
+                    : (end.Value, begin.Value);
+            }
+
+            return begin.HasValue
+                ? (begin.Value, DateTime.Today.AddDays(1).AddSeconds(-1))
+                : (DateTime.Today.AddYears(-1), end.Value);
+        }
+
+        private static string GetCnWeekday(DayOfWeek day)
+        {
+            return day switch
+            {
+                DayOfWeek.Sunday => "日",
+                DayOfWeek.Monday => "一",
+                DayOfWeek.Tuesday => "二",
+                DayOfWeek.Wednesday => "三",
+                DayOfWeek.Thursday => "四",
+                DayOfWeek.Friday => "五",
+                _ => "六"
+            };
         }
 
         private static SysAiCronParseResult ParseCronResult(string raw)

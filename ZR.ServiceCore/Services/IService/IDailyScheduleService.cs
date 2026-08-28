@@ -55,5 +55,10 @@ namespace ZR.ServiceCore.Services
         /// 未完成日程列表（Status=0），按 DueTime 升序、Priority 降序，供日程 tab 打开时查询。
         /// </summary>
         List<DailySchedule> GetReminderSchedules(long userId);
+
+        /// <summary>
+        /// 按时间范围查询（按当前用户隔离），创建时间、截止时间或完成时间任一落在区间内即命中。
+        /// </summary>
+        List<DailySchedule> GetByDateRange(long userId, DateTime begin, DateTime end);
     }
 }

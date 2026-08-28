@@ -12,10 +12,12 @@ namespace ZR.Admin.WebApi.Controllers.System
     public class DailyScheduleController : BaseController
     {
         private readonly IDailyScheduleService _DailyScheduleService;
+        private readonly ISysAiService _sysAiService;
 
-        public DailyScheduleController(IDailyScheduleService DailyScheduleService)
+        public DailyScheduleController(IDailyScheduleService DailyScheduleService, ISysAiService sysAiService)
         {
             _DailyScheduleService = DailyScheduleService;
+            _sysAiService = sysAiService;
         }
 
         /// <summary>
@@ -114,6 +116,41 @@ namespace ZR.Admin.WebApi.Controllers.System
             }
             var userId = HttpContext.GetUId();
             return SUCCESS(_DailyScheduleService.ChangeStatus(parm.Id, parm.Status, userId));
+        }
+
+        /// <summary>
+        /// AI 一句话解析日程，返回可编辑草稿（不落库），确认后调用新增接口保存
+        /// </summary>
+        [HttpPost("ai/parse")]
+        [ActionPermissionFilter(Permission = "common")]
+        public async Task<IActionResult> AiParse([FromBody] SysAiScheduleParseInput parm)
+        {
+            try
+            {
+                return SUCCESS(await _sysAiService.ParseScheduleAsync(parm));
+            }
+            catch (Exception ex)
+            {
+                return ToResponse(ResultCode.FAIL, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// AI 汇总指定区间（默认本周）日程生成周报
+        /// </summary>
+        [HttpPost("ai/weeklyReport")]
+        [ActionPermissionFilter(Permission = "common")]
+        public async Task<IActionResult> AiWeeklyReport([FromBody] SysAiWeeklyReportInput parm)
+        {
+            try
+            {
+                var userId = HttpContext.GetUId();
+                return SUCCESS(await _sysAiService.GenerateWeeklyReportAsync(parm, userId));
+            }
+            catch (Exception ex)
+            {
+                return ToResponse(ResultCode.FAIL, ex.Message);
+            }
         }
 
         /// <summary>

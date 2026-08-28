@@ -22,5 +22,15 @@ namespace ZR.ServiceCore.Services
         /// 自然语言调度描述转 Quartz Cron 表达式
         /// </summary>
         Task<SysAiCronParseResult> ParseCronAsync(SysAiCronParseInput input);
+
+        /// <summary>
+        /// 一句话口语描述解析为日程字段，返回可编辑草稿，不落库
+        /// </summary>
+        Task<SysAiScheduleParseResult> ParseScheduleAsync(SysAiScheduleParseInput input);
+
+        /// <summary>
+        /// 汇总指定区间（默认本周）内当前用户的日程生成周报文本，不落库
+        /// </summary>
+        Task<SysAiWeeklyReportResult> GenerateWeeklyReportAsync(SysAiWeeklyReportInput input, long userId);
     }
 }

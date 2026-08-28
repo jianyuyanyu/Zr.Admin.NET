@@ -108,4 +108,76 @@ namespace ZR.Model.System.Dto
         /// <summary>AI 返回非结构化 JSON 时承载原文</summary>
         public string Raw { get; set; }
     }
+
+    /// <summary>
+    /// AI 一句话解析日程入参
+    /// </summary>
+    public class SysAiScheduleParseInput
+    {
+        /// <summary>口语化描述，如「下周三下午三点前把季度报表发给张总，加急」</summary>
+        public string Text { get; set; }
+    }
+
+    /// <summary>
+    /// AI 一句话解析日程结果（草稿，需用户确认后才落库）
+    /// </summary>
+    public class SysAiScheduleParseResult
+    {
+        public string Title { get; set; }
+
+        public string Content { get; set; }
+
+        /// <summary>优先级：1低 2中 3高</summary>
+        public int Priority { get; set; } = 2;
+
+        /// <summary>截止时间，格式 yyyy-MM-dd HH:mm，无则为空</summary>
+        public string DueTime { get; set; }
+
+        /// <summary>提醒时间，格式 yyyy-MM-dd HH:mm，无则为空</summary>
+        public string ReminderTime { get; set; }
+
+        /// <summary>AI 对模糊表述所做的假设说明</summary>
+        public string Warnings { get; set; }
+
+        /// <summary>AI 返回非结构化 JSON 时承载原文</summary>
+        public string Raw { get; set; }
+    }
+
+    /// <summary>
+    /// AI 周报汇总入参（不传时间则默认取本周，周一为起始日）
+    /// </summary>
+    public class SysAiWeeklyReportInput
+    {
+        public DateTime? BeginTime { get; set; }
+
+        public DateTime? EndTime { get; set; }
+    }
+
+    /// <summary>
+    /// AI 周报汇总结果（纯文本，不落库）
+    /// </summary>
+    public class SysAiWeeklyReportResult
+    {
+        public string PeriodStart { get; set; }
+
+        public string PeriodEnd { get; set; }
+
+        /// <summary>整体情况概述</summary>
+        public string Summary { get; set; }
+
+        /// <summary>已完成事项</summary>
+        public List<string> Completed { get; set; } = new();
+
+        /// <summary>未完成事项</summary>
+        public List<string> Pending { get; set; } = new();
+
+        /// <summary>可观察到的风险项</summary>
+        public List<string> Risks { get; set; } = new();
+
+        /// <summary>参与统计的日程总数，便于用户核对是否与页面一致</summary>
+        public int Total { get; set; }
+
+        /// <summary>AI 返回非结构化 JSON 时承载原文</summary>
+        public string Raw { get; set; }
+    }
 }

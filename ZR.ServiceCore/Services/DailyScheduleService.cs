@@ -119,6 +119,22 @@ namespace ZR.ServiceCore.Services
         }
 
         /// <summary>
+        /// 按时间范围查询（按当前用户隔离）。命中条件为创建时间、截止时间或完成时间任一落在区间内，
+        /// 避免只按 DueTime 过滤时漏掉无截止时间或跨期完成的日程。供周报等汇总场景使用。
+        /// </summary>
+        public List<DailySchedule> GetByDateRange(long userId, DateTime begin, DateTime end)
+        {
+            return Queryable()
+                .Where(m => m.UserId == userId)
+                .Where(m =>
+                    (m.Create_time >= begin && m.Create_time <= end) ||
+                    (m.DueTime >= begin && m.DueTime <= end) ||
+                    (m.FinishTime >= begin && m.FinishTime <= end))
+                .OrderBy(m => m.DueTime, OrderByType.Asc)
+                .ToList();
+        }
+
+        /// <summary>
         /// 未完成日程列表（Status=0），按 DueTime 升序（无截止时间排后）、Priority 降序。
         /// 供消息中心日程 tab 打开时查询，不写消息、不标记已提醒。
         /// </summary>
