@@ -180,4 +180,85 @@ namespace ZR.Model.System.Dto
         /// <summary>AI 返回非结构化 JSON 时承载原文</summary>
         public string Raw { get; set; }
     }
+
+    /// <summary>
+    /// 代码生成列配置推断：单列输入描述
+    /// </summary>
+    public class SysAiGenColumnItem
+    {
+        /// <summary>数据库列名</summary>
+        public string ColumnName { get; set; }
+
+        public string CsharpType { get; set; }
+
+        /// <summary>列长度上限，0 表示未取到</summary>
+        public int Length { get; set; }
+
+        public bool IsPk { get; set; }
+
+        public bool IsNullable { get; set; }
+
+        /// <summary>数据库列注释，可能为空</summary>
+        public string Comment { get; set; }
+    }
+
+    /// <summary>
+    /// 代码生成列配置推断入参
+    /// </summary>
+    public class SysAiGenColumnInput
+    {
+        public string TableName { get; set; }
+
+        public List<SysAiGenColumnItem> Columns { get; set; }
+    }
+
+    /// <summary>
+    /// 单列配置建议。Current* 为库里当前值，便于前端做差异对比后让用户勾选。
+    /// </summary>
+    public class SysAiGenColumnSuggestion
+    {
+        public string ColumnName { get; set; }
+
+        /// <summary>建议的中文标签</summary>
+        public string Comment { get; set; }
+
+        /// <summary>建议的控件类型</summary>
+        public string HtmlType { get; set; }
+
+        public bool IsRequired { get; set; }
+
+        public bool IsList { get; set; }
+
+        public bool IsQuery { get; set; }
+
+        public bool IsEdit { get; set; }
+
+        /// <summary>推断依据，供人工复核</summary>
+        public string Reason { get; set; }
+
+        /// <summary>库中当前的注释</summary>
+        public string CurrentComment { get; set; }
+
+        /// <summary>库中当前的控件类型</summary>
+        public string CurrentHtmlType { get; set; }
+
+        /// <summary>建议与当前值存在差异的字段，便于前端高亮，如 "comment,htmlType"</summary>
+        public string DiffFields { get; set; }
+
+        /// <summary>true 时前端默认不勾选，避免用户误采纳改坏结构约束</summary>
+        public bool SkipByDefault { get; set; }
+    }
+
+    /// <summary>
+    /// 代码生成列配置推断结果（纯建议，不落库）
+    /// </summary>
+    public class SysAiGenColumnResult
+    {
+        public string TableName { get; set; }
+
+        public List<SysAiGenColumnSuggestion> Columns { get; set; } = new();
+
+        /// <summary>AI 返回非结构化 JSON 时承载原文</summary>
+        public string Raw { get; set; }
+    }
 }

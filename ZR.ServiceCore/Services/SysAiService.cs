@@ -6,6 +6,7 @@ using System.Globalization;
 using System.Text.Json;
 using ZR.Model.Models;
 using ZR.Model.System.Dto;
+using ZR.Model.System.Generate;
 
 namespace ZR.ServiceCore.Services
 {
@@ -29,16 +30,50 @@ namespace ZR.ServiceCore.Services
         /// <summary>周报允许参与汇总的日程上限，超出只取前 N 条，避免撑爆上下文</summary>
         private const int MaxWeeklyReportItems = 100;
 
+        /// <summary>单次推断列数上限，超宽表需分批</summary>
+        private const int MaxGenColumnItems = 80;
+
+        /// <summary>
+        /// 代码生成允许的控件类型白名单。AI 只能从中取值，越界一律回落 input，
+        /// 否则未知类型会让代码模板渲染出无法编译的前端代码。
+        /// </summary>
+        /// <summary>
+        /// AI 返回的单个列建议。用于在 JsonDocument 释放前把数据取出来，
+        /// JsonElement 只是文档内游标，不能跨 using 持有。
+        /// </summary>
+        private sealed class GenColumnReply
+        {
+            public string Comment { get; set; }
+            public string Reason { get; set; }
+            public string HtmlType { get; set; }
+            public bool IsRequired { get; set; }
+            public bool IsList { get; set; }
+            public bool IsQuery { get; set; }
+            public bool IsEdit { get; set; }
+        }
+
+        private static readonly HashSet<string> AllowedHtmlTypes = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "input", "inputNumber", "textarea", "select", "selectMulti", "radio",
+            "checkbox", "datetime", "imageUpload", "fileUpload", "editor",
+            "customInput", "colorPicker"
+        };
+
         private readonly ICommonLangService _commonLangService;
         private readonly IDailyScheduleService _dailyScheduleService;
+        private readonly IGenTableColumnService _genTableColumnService;
 
         private static readonly PromptLoader PromptLoader =
             new(AppSettings.Get<AiOptions>("AiOptions")?.PromptDir);
 
-        public SysAiService(ICommonLangService commonLangService, IDailyScheduleService dailyScheduleService)
+        public SysAiService(
+            ICommonLangService commonLangService,
+            IDailyScheduleService dailyScheduleService,
+            IGenTableColumnService genTableColumnService)
         {
             _commonLangService = commonLangService;
             _dailyScheduleService = dailyScheduleService;
+            _genTableColumnService = genTableColumnService;
         }
 
         public async Task<SysAiLangTranslateResult> TranslateLangAsync(SysAiLangTranslateInput input)
@@ -222,6 +257,47 @@ namespace ZR.ServiceCore.Services
             return parsed;
         }
 
+        public async Task<SysAiGenColumnResult> SuggestGenColumnsAsync(long tableId)
+        {
+            if (tableId <= 0)
+            {
+                throw new Exception("参数错误：tableId 不能为空");
+            }
+
+            var dbColumns = _genTableColumnService.GenTableColumns(tableId)
+                .Where(x => !string.IsNullOrWhiteSpace(x.ColumnName))
+                .ToList();
+            if (dbColumns.Count == 0)
+            {
+                throw new Exception("没有可推断的列，请确认表结构已导入");
+            }
+            if (dbColumns.Count > MaxGenColumnItems)
+            {
+                throw new Exception($"单次最多推断 {MaxGenColumnItems} 列，当前 {dbColumns.Count} 列，请拆分表后重试");
+            }
+
+            var payload = new
+            {
+                tableName = dbColumns.FirstOrDefault()?.TableName ?? string.Empty,
+                columns = dbColumns.Select(x => new
+                {
+                    columnName = Clip(x.ColumnName.Trim(), 100),
+                    csharpType = x.CsharpType ?? string.Empty,
+                    // GenTableColumn 未单独存长度，只能从 ColumnType（如 nvarchar(500)）里解析
+                    length = ParseColumnLength(x.ColumnType),
+                    isPk = x.IsPk,
+                    isNullable = !x.IsRequired,
+                    comment = Clip(x.ColumnComment ?? string.Empty, 200)
+                }).ToList()
+            };
+
+            var reply = await ChatSafeAsync(
+                GetPromptOrThrow("system/gencode-columns.md", "代码生成列配置推断"),
+                System.Text.Json.JsonSerializer.Serialize(payload)).ConfigureAwait(false);
+
+            return ParseGenColumnResult(reply, payload.tableName, dbColumns);
+        }
+
         /// <summary>
         /// 组装翻译请求正文：用 JSON 承载条目，避免多行文本在换行/引号上与提示词混淆。
         /// </summary>
@@ -351,6 +427,163 @@ namespace ZR.ServiceCore.Services
                 result.Raw = raw.Trim();
             }
             return result;
+        }
+
+        /// <summary>
+        /// 解析列配置建议。AI 输出一律过白名单与结构约束，并带上库中当前值供前端做差异对比。
+        /// </summary>
+        private static SysAiGenColumnResult ParseGenColumnResult(string raw, string tableName, List<GenTableColumn> columns)
+        {
+            var result = new SysAiGenColumnResult { TableName = tableName };
+            // 必须在 JsonDocument 释放前把数据取出来：JsonElement 只是文档内的游标，
+            // 文档一 dispose 再访问就抛 ObjectDisposedException
+            var byName = new Dictionary<string, GenColumnReply>(StringComparer.OrdinalIgnoreCase);
+            var parsed = false;
+
+            if (!string.IsNullOrWhiteSpace(raw))
+            {
+                var json = JsonHelper.StripMarkdown(raw);
+                try
+                {
+                    using var doc = JsonDocument.Parse(json);
+                    if (doc.RootElement.ValueKind == JsonValueKind.Object &&
+                        doc.RootElement.TryGetProperty("columns", out var arr) &&
+                        arr.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var el in arr.EnumerateArray())
+                        {
+                            var name = ReadString(el, "columnName");
+                            if (string.IsNullOrWhiteSpace(name) || el.ValueKind != JsonValueKind.Object) continue;
+                            byName[name.Trim()] = new GenColumnReply
+                            {
+                                Comment = (ReadString(el, "comment") ?? string.Empty).Trim(),
+                                Reason = (ReadString(el, "reason") ?? string.Empty).Trim(),
+                                HtmlType = (ReadString(el, "htmlType") ?? string.Empty).Trim(),
+                                IsRequired = ReadBool(el, "isRequired"),
+                                IsList = ReadBool(el, "isList"),
+                                IsQuery = ReadBool(el, "isQuery"),
+                                IsEdit = ReadBool(el, "isEdit")
+                            };
+                        }
+                        parsed = true;
+                    }
+                }
+                catch (System.Text.Json.JsonException)
+                {
+                    // 非结构化返回走 Raw 兜底
+                }
+            }
+
+            if (!parsed)
+            {
+                result.Raw = raw?.Trim();
+                return result;
+            }
+
+            foreach (var col in columns)
+            {
+                var name = col.ColumnName.Trim();
+                byName.TryGetValue(name, out var reply);
+
+                var currentComment = col.ColumnComment ?? string.Empty;
+                var currentHtmlType = col.HtmlType ?? string.Empty;
+
+                var suggestion = new SysAiGenColumnSuggestion
+                {
+                    ColumnName = name,
+                    CurrentComment = currentComment,
+                    CurrentHtmlType = currentHtmlType,
+                    // 主键与自增列属于结构约束，默认不勾选避免误采纳改坏生成代码
+                    SkipByDefault = col.IsPk
+                };
+
+                if (reply != null)
+                {
+                    suggestion.Comment = reply.Comment;
+                    suggestion.Reason = reply.Reason;
+                    suggestion.HtmlType = AllowedHtmlTypes.Contains(reply.HtmlType) ? reply.HtmlType : "input";
+                    suggestion.IsRequired = reply.IsRequired;
+                    suggestion.IsList = reply.IsList;
+                    suggestion.IsQuery = reply.IsQuery;
+                    suggestion.IsEdit = reply.IsEdit;
+                }
+                else
+                {
+                    // 该列 AI 未返回，给安全的兜底建议而不是留空
+                    suggestion.Comment = currentComment;
+                    suggestion.HtmlType = "input";
+                    suggestion.IsRequired = col.IsRequired && !col.IsPk;
+                    suggestion.IsList = col.IsList;
+                    suggestion.IsQuery = col.IsQuery;
+                    suggestion.IsEdit = col.IsEdit;
+                    suggestion.Reason = "AI 未返回该列，已沿用当前配置";
+                }
+
+                // 数据库注释已有内容时以库里为准，不让 AI 改写人工录入或同步来的注释
+                if (!string.IsNullOrWhiteSpace(currentComment))
+                {
+                    suggestion.Comment = currentComment;
+                }
+                // 主键不可编辑且非必填，强制收敛
+                if (col.IsPk)
+                {
+                    suggestion.IsEdit = false;
+                    suggestion.IsRequired = false;
+                }
+
+                suggestion.DiffFields = BuildDiffFields(suggestion, col);
+                result.Columns.Add(suggestion);
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// 从列类型字符串里解析长度，如 "nvarchar(500)" 得 500。解析不到返回 0 表示未知。
+        /// </summary>
+        private static int ParseColumnLength(string columnType)
+        {
+            if (string.IsNullOrWhiteSpace(columnType)) return 0;
+
+            var start = columnType.IndexOf('(');
+            var end = columnType.IndexOf(')', start + 1);
+            if (start < 0 || end <= start + 1) return 0;
+
+            return int.TryParse(columnType.AsSpan(start + 1, end - start - 1), out var len) ? len : 0;
+        }
+
+        /// <summary>
+        /// 计算建议与库中当前配置的差异字段，供前端高亮。
+        /// 只比较本次会采纳的四项，注释与控件类型差异单独列出。
+        /// </summary>
+        private static string BuildDiffFields(SysAiGenColumnSuggestion s, GenTableColumn current)
+        {
+            var diffs = new List<string>();
+            if (!string.Equals(s.Comment, current.ColumnComment ?? string.Empty, StringComparison.Ordinal))
+            {
+                diffs.Add("comment");
+            }
+            if (!string.Equals(s.HtmlType, current.HtmlType ?? string.Empty, StringComparison.OrdinalIgnoreCase))
+            {
+                diffs.Add("htmlType");
+            }
+            if (s.IsRequired != current.IsRequired) diffs.Add("isRequired");
+            if (s.IsList != current.IsList) diffs.Add("isList");
+            if (s.IsQuery != current.IsQuery) diffs.Add("isQuery");
+            if (s.IsEdit != current.IsEdit) diffs.Add("isEdit");
+            return string.Join(",", diffs);
+        }
+
+        private static bool ReadBool(JsonElement el, string name)
+        {
+            if (!el.TryGetProperty(name, out var v)) return false;
+            return v.ValueKind switch
+            {
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                JsonValueKind.String => bool.TryParse(v.GetString(), out var b) && b,
+                JsonValueKind.Number => v.TryGetInt32(out var n) && n != 0,
+                _ => false
+            };
         }
 
         private static SysAiWeeklyReportResult ParseWeeklyReportResult(string raw)

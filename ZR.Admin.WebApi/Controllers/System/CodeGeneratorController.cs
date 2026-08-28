@@ -24,19 +24,40 @@ namespace ZR.Admin.WebApi.Controllers
         private readonly ISysMenuService SysMenuService;
         private readonly IWebHostEnvironment WebHostEnvironment;
         private readonly OptionsSetting OptionsSetting;
+        private readonly ISysAiService SysAiService;
 
         public CodeGeneratorController(
             IGenTableService genTableService,
             IGenTableColumnService genTableColumnService,
             IWebHostEnvironment webHostEnvironment,
             IOptions<OptionsSetting> options,
-            ISysMenuService sysMenuService)
+            ISysMenuService sysMenuService,
+            ISysAiService sysAiService)
         {
             GenTableService = genTableService;
             GenTableColumnService = genTableColumnService;
             WebHostEnvironment = webHostEnvironment;
             SysMenuService = sysMenuService;
             OptionsSetting = options.Value;
+            SysAiService = sysAiService;
+        }
+
+        /// <summary>
+        /// AI 推断列配置建议（中文标签/控件类型/是否列表查询等）。
+        /// 只返回建议不写库，采纳与否由用户在列配置页勾选后走既有保存接口。
+        /// </summary>
+        [HttpPost("ai/suggestColumns/{tableId}")]
+        [ActionPermissionFilter(Permission = "tool:gen:ai")]
+        public async Task<IActionResult> AiSuggestColumns([FromRoute] long tableId)
+        {
+            try
+            {
+                return SUCCESS(await SysAiService.SuggestGenColumnsAsync(tableId));
+            }
+            catch (Exception ex)
+            {
+                return ToResponse(ResultCode.FAIL, ex.Message);
+            }
         }
 
         /// <summary>

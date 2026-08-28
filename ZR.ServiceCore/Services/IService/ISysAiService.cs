@@ -32,5 +32,11 @@ namespace ZR.ServiceCore.Services
         /// 汇总指定区间（默认本周）内当前用户的日程生成周报文本，不落库
         /// </summary>
         Task<SysAiWeeklyReportResult> GenerateWeeklyReportAsync(SysAiWeeklyReportInput input, long userId);
+
+        /// <summary>
+        /// 按代码生成表 id 推断各列配置建议（中文标签/控件类型/是否列表查询等）。
+        /// 只返回建议不落库，采纳与否由用户在列配置页勾选后走既有保存接口。
+        /// </summary>
+        Task<SysAiGenColumnResult> SuggestGenColumnsAsync(long tableId);
     }
 }
