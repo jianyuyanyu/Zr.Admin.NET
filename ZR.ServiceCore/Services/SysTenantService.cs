@@ -12,6 +12,7 @@ using ZR.Model.social;
 using ZR.Model.System;
 using ZR.Model.System.Dto;
 using ZR.Model.System.Tenant;
+using ZR.ServiceCore.Sms;
 using ZR.ServiceCore.Signalr;
 
 namespace ZR.ServiceCore.Services
@@ -25,15 +26,18 @@ namespace ZR.ServiceCore.Services
         private readonly IEnumerable<ITenantModuleInitializer> _moduleInitializers;
         private readonly ISysUserMsgService _sysUserMsgService;
         private readonly IHubContext<MessageHub> _hubContext;
+        private readonly ISmsSender _smsSender;
 
         public SysTenantService(
             IEnumerable<ITenantModuleInitializer> moduleInitializers,
             ISysUserMsgService sysUserMsgService,
-            IHubContext<MessageHub> hubContext)
+            IHubContext<MessageHub> hubContext,
+            ISmsSender smsSender)
         {
             _moduleInitializers = moduleInitializers ?? Enumerable.Empty<ITenantModuleInitializer>();
             _sysUserMsgService = sysUserMsgService;
             _hubContext = hubContext;
+            _smsSender = smsSender;
         }
 
         /// <summary>
@@ -44,6 +48,47 @@ namespace ZR.ServiceCore.Services
         {
             if (string.IsNullOrWhiteSpace(tenantId)) return;
             _sysUserMsgService.AddSysUserMsg(1, content, UserMsgType.TENANT_NOTICE, tenantId);
+        }
+
+        /// <summary>
+        /// 向租户联系人发送短信通知（依赖 ISmsSender 抽象，不绑定具体服务商）。
+        /// 模板编码取自 SmsOptions.Templates[templateKey]；未配置模板或联系人手机号为空时静默跳过。
+        /// 短信服务未启用时由 DefaultSmsSender 走模拟发送（仅记日志）。发送失败仅记日志，不影响主流程。
+        /// 内置场景 key：tenantExpireRemind / tenantSuspended / tenantDecommissioned / tenantPlanDegraded
+        /// </summary>
+        /// <param name="phone">联系人手机号</param>
+        /// <param name="templateKey">SmsOptions.Templates 中的场景 key</param>
+        /// <param name="templateParams">模板参数（如 days/expiryDate/date）</param>
+        private void SendTenantSms(string phone, string templateKey, Dictionary<string, string> templateParams)
+        {
+            if (string.IsNullOrWhiteSpace(phone)) return;
+
+            try
+            {
+                var templateCode = App.OptionsSetting?.SmsOptions?.Templates?.GetValueOrDefault(templateKey);
+                if (string.IsNullOrWhiteSpace(templateCode))
+                {
+                    Log.WriteLine(ConsoleColor.DarkGray, $"[SysTenantService] 短信模板[{templateKey}]未配置(SmsOptions.Templates)，跳过短信通知");
+                    return;
+                }
+
+                var result = _smsSender.Send(new SmsMessage
+                {
+                    PhoneNum = phone.Trim(),
+                    TemplateCode = templateCode,
+                    TemplateParams = templateParams,
+                    SendType = 6
+                });
+
+                if (!result.Success)
+                {
+                    Log.WriteLine(ConsoleColor.Yellow, $"[SysTenantService] 租户短信发送失败({templateKey})：{result.ErrorCode} {result.ErrorMsg}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.WriteLine(ConsoleColor.Red, $"[SysTenantService] 租户短信发送异常({templateKey})：{ex.Message}");
+            }
         }
 
         public PagedInfo<SysTenant> GetPageList(SysTenantQueryDto parm)
@@ -395,6 +440,11 @@ namespace ZR.ServiceCore.Services
 
             var suspendReason = string.IsNullOrEmpty(remark) ? "" : $"，原因：{remark}";
             SendTenantAdminMessage(normalizedTenantId, $"您的租户已暂停服务{suspendReason}，如有疑问请联系平台管理员。");
+            SendTenantSms(tenant.ContactPhone, "tenantSuspended", new Dictionary<string, string>
+            {
+                ["date"] = DateTime.Now.ToString("yyyy-MM-dd"),
+                ["reason"] = string.IsNullOrEmpty(remark) ? "服务管理" : remark
+            });
 
             var kicked = KickTenantOnlineUsers(normalizedTenantId, $"您的租户已暂停服务{suspendReason}，请重新登录或联系平台管理员");
             AppendStep(result, "kick-online-users", true, $"已通知{kicked}个在线连接强制下线");
@@ -529,6 +579,11 @@ namespace ZR.ServiceCore.Services
 
             var kicked = KickTenantOnlineUsers(tenantId, "您的租户已注销下线，如有疑问请联系平台管理员");
             AppendStep(result, "kick-online-users", true, $"已通知{kicked}个在线连接强制下线");
+
+            SendTenantSms(tenant.ContactPhone, "tenantDecommissioned", new Dictionary<string, string>
+            {
+                ["date"] = DateTime.Now.ToString("yyyy-MM-dd")
+            });
 
             RemoveDomainMapCache();
             result.Success = true;
@@ -966,6 +1021,11 @@ namespace ZR.ServiceCore.Services
 
                 SendTenantAdminMessage(tenant.TenantId,
                     $"您的租户将于{stage}天后（{tenant.ExpireTime.Value:yyyy-MM-dd}）到期，到期后服务将自动暂停，请及时联系平台管理员续费。");
+                SendTenantSms(tenant.ContactPhone, "tenantExpireRemind", new Dictionary<string, string>
+                {
+                    ["days"] = stage.ToString(),
+                    ["expiryDate"] = tenant.ExpireTime.Value.ToString("yyyy-MM-dd")
+                });
 
                 tenant.Remark = string.IsNullOrWhiteSpace(tenant.Remark) ? mark : $"{tenant.Remark}{mark}";
                 tenant.Update_by = operatorName;
@@ -999,6 +1059,12 @@ namespace ZR.ServiceCore.Services
 
                 SendTenantAdminMessage(binding.TenantId,
                     $"您的套餐[{binding.PlanCode}]已于{binding.EndTime:yyyy-MM-dd}到期，已自动降级为默认套餐，部分功能可能受限，如需恢复请联系平台管理员续费升级。");
+                var bindingTenant = GetByTenantId(binding.TenantId);
+                SendTenantSms(bindingTenant?.ContactPhone, "tenantPlanDegraded", new Dictionary<string, string>
+                {
+                    ["planName"] = binding.PlanCode,
+                    ["date"] = binding.EndTime?.ToString("yyyy-MM-dd") ?? DateTime.Now.ToString("yyyy-MM-dd")
+                });
 
                 // Status=2 标记已处理降级：与 Status=1（被新绑定顶替失效）区分，同时天然幂等
                 Context.Updateable<SysTenantPlanBinding>()
