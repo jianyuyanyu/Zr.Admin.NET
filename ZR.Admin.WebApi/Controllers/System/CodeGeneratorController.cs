@@ -18,6 +18,7 @@ namespace ZR.Admin.WebApi.Controllers
     public class CodeGeneratorController : BaseController
     {
         private readonly CodeGeneraterService _CodeGeneraterService = new CodeGeneraterService();
+        private NLog.Logger logger = NLog.LogManager.GetCurrentClassLogger();
         private readonly IGenTableService GenTableService;
         private readonly IGenTableColumnService GenTableColumnService;
         private readonly ISysMenuService SysMenuService;
@@ -47,7 +48,7 @@ namespace ZR.Admin.WebApi.Controllers
         public IActionResult GetListDataBase()
         {
             var dbList = _CodeGeneraterService.GetAllDataBases();
-            var defaultDb = dbList?[0];
+            var defaultDb = dbList?.FirstOrDefault();
             return SUCCESS(new { dbList, defaultDb });
         }
 
@@ -165,7 +166,7 @@ namespace ZR.Admin.WebApi.Controllers
                 genTable.TableId = GenTableService.ImportGenTable(genTable);
                 if (OptionsSetting.CodeGenDbConfig.DbType == 3)
                 {
-                    seqs = _CodeGeneraterService.GetAllOracleSeqs(table.Name);
+                    seqs = _CodeGeneraterService.GetAllOracleSeqs();
                 }
                 if (genTable.TableId > 0)
                 {
@@ -209,6 +210,11 @@ namespace ZR.Admin.WebApi.Controllers
                     GenTableColumnService.UpdateGenTableColumn(genTable.Columns);
                 }
             });
+            if (!result.IsSuccess)
+            {
+                // 事务失败向上抛出真实原因，避免被吞掉后前端只看到 false
+                throw result.ErrorException ?? new CustomException("保存代码生成配置失败：" + result.ErrorMessage);
+            }
 
             return SUCCESS(result.IsSuccess);
         }
@@ -221,13 +227,13 @@ namespace ZR.Admin.WebApi.Controllers
         /// <returns></returns>
         [HttpPost("preview/{tableId}")]
         [ActionPermissionFilter(Permission = "tool:gen:preview")]
-        public IActionResult Preview([FromQuery] GenerateDto dto, [FromRoute] int tableId = 0)
+        public IActionResult Preview([FromQuery] GenerateDto dto, [FromRoute] long tableId = 0)
         {
-            dto.TableId = tableId;
-            if (dto == null || dto.TableId <= 0)
+            if (dto == null || tableId <= 0)
             {
                 throw new CustomException(ResultCode.CUSTOM_ERROR, "请求参数为空");
             }
+            dto.TableId = tableId;
             var genTableInfo = GenTableService.GetGenTableInfo(dto.TableId);
 
             dto.DbType = OptionsSetting.CodeGenDbConfig.DbType;
@@ -279,9 +285,15 @@ namespace ZR.Admin.WebApi.Controllers
                 {
                     parentPath = tempPath[..tempPath.LastIndexOf(@"\")];
                 }
-                Console.WriteLine("代码生成路径" + parentPath);
                 //代码生成文件夹路径
                 dto.GenCodePath = (genPath.IsEmpty() || genPath.Equals("/")) ? parentPath : genPath;
+
+                // 安全校验：自定义路径必须位于允许的根目录内，防止路径穿越向服务器任意位置写文件
+                if (!IsSubPathOf(dto.GenCodePath, parentPath))
+                {
+                    logger.Warn($"代码生成拒绝非法自定义路径：genPath={genPath}，允许根目录={parentPath}，tableId={dto.TableId}");
+                    throw new CustomException($"自定义生成路径必须在允许的目录内：{parentPath}");
+                }
             }
             else
             {
@@ -322,12 +334,40 @@ namespace ZR.Admin.WebApi.Controllers
             if (table == null) { throw new CustomException("同步数据失败，原表结构不存在"); }
             table.Update_by = HttpContext.GetName();
 
-            var codeGen = AppSettings.Get<CodeGen>("codeGen");
+            // Oracle 需查序列判定自增列，与导入行为保持一致
+            List<OracleSeq> seqs = null;
+            if (OptionsSetting.CodeGenDbConfig.DbType == 3)
+            {
+                seqs = _CodeGeneraterService.GetAllOracleSeqs();
+            }
             List<DbColumnInfo> dbColumnInfos = _CodeGeneraterService.GetColumnInfo(table.DbName, tableName);
-            List<GenTableColumn> dbTableColumns = CodeGeneratorTool.InitGenTableColumn(table, dbColumnInfos, codeGen: codeGen);
+            List<GenTableColumn> dbTableColumns = CodeGeneratorTool.InitGenTableColumn(table, dbColumnInfos, seqs, OptionsSetting.CodeGen);
 
             bool result = GenTableService.SynchDb(tableId, table, dbTableColumns);
             return SUCCESS(result);
+        }
+
+        /// <summary>
+        /// 判断 target 路径是否位于 root 目录内（含等于 root），用于拦截路径穿越。
+        /// Windows 下忽略大小写，Unix 下大小写敏感。
+        /// </summary>
+        private static bool IsSubPathOf(string target, string root)
+        {
+            if (string.IsNullOrWhiteSpace(target) || string.IsNullOrWhiteSpace(root)) return false;
+            try
+            {
+                var fullTarget = Path.GetFullPath(target);
+                var fullRoot = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                var comparison = ComputerHelper.IsUnix() ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
+                if (!fullTarget.StartsWith(fullRoot, comparison)) return false;
+                return fullTarget.Length == fullRoot.Length
+                    || fullTarget[fullRoot.Length] == Path.DirectorySeparatorChar
+                    || fullTarget[fullRoot.Length] == Path.AltDirectorySeparatorChar;
+            }
+            catch
+            {
+                return false;
+            }
         }
     }
 }

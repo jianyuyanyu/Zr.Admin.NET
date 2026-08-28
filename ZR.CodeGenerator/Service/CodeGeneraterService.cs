@@ -21,7 +21,7 @@ namespace ZR.CodeGenerator.Service
             DbConfigs configs = AppSettings.Get<DbConfigs>(nameof(GenConstants.CodeGenDbConfig));
             if (configs.DbType == 3)
             {
-                return new List<string>() { configs?.DbName };
+                return string.IsNullOrEmpty(configs?.DbName) ? new List<string>() : new List<string> { configs.DbName };
             }
             var templist = db.DbMaintenance.GetDataBaseList(db);
 
@@ -44,7 +44,8 @@ namespace ZR.CodeGenerator.Service
             }
             //tableList = tableList.Where(f => !new string[] { "gen", "sys_" }.Contains(f.Name)).ToList();
             pager.TotalNum = tableList.Count;
-            return tableList.Skip(pager.PageSize * (pager.PageNum - 1)).Take(pager.PageSize).OrderBy(f => f.Name).ToList();
+            // 先排序再分页，保证跨页顺序稳定
+            return tableList.OrderBy(f => f.Name).Skip(pager.PageSize * (pager.PageNum - 1)).Take(pager.PageSize).ToList();
         }
 
         /// <summary>
@@ -75,14 +76,13 @@ namespace ZR.CodeGenerator.Service
         }
 
         /// <summary>
-        /// 获取Oracle所有序列
+        /// 获取Oracle所有序列（USER_SEQUENCES 为当前用户 schema 的序列，与库名无关）
         /// </summary>
-        /// <param name="dbName"></param>
         /// <returns></returns>
-        public List<OracleSeq> GetAllOracleSeqs(string dbName)
+        public List<OracleSeq> GetAllOracleSeqs()
         {
             string sql = "SELECT * FROM USER_SEQUENCES";
-            var seqs = GetSugarDbContext(dbName).Ado.SqlQuery<OracleSeq>(sql);
+            var seqs = GetSugarDbContext().Ado.SqlQuery<OracleSeq>(sql);
 
             return seqs.ToList();
         }

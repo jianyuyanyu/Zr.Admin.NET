@@ -12,8 +12,6 @@ namespace ZR.CodeGenerator
     /// </summary>
     public class DbProvider
     {
-        protected static SqlSugarClient CodeDb;
-
         /// <summary>
         /// 获取动态连接字符串
         /// </summary>
@@ -41,7 +39,6 @@ namespace ZR.CodeGenerator
                 },
             });
 
-            CodeDb = db;
             return db;
         }
 
