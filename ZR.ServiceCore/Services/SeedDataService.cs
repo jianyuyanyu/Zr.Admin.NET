@@ -349,6 +349,8 @@ namespace ZR.ServiceCore.Services
                 result.Add(new SystemTaskSeedService().EnsureTenantExpireRemindTaskSeedData());
                 result.Add(new SystemTaskSeedService().EnsureWorkflowTimeoutTaskSeedData());
                 result.Add(new MallSeedService().EnsureTasksSeedData());
+                // 依赖 InitMenuData 已写入菜单，须排在其后
+                result.Add(new SystemMenuSeedService().EnsureAiPermSeedData());
 
                 db.Ado.CommitTran();
             }

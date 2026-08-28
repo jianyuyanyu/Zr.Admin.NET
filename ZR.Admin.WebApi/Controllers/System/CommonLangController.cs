@@ -3,6 +3,7 @@ using MiniExcelLibs;
 using ZR.Model;
 using ZR.Model.Dto;
 using ZR.Model.Models;
+using ZR.Model.System.Dto;
 
 namespace ZR.Admin.WebApi.Controllers
 {
@@ -17,10 +18,12 @@ namespace ZR.Admin.WebApi.Controllers
         /// 多语言配置接口
         /// </summary>
         private readonly ICommonLangService _CommonLangService;
+        private readonly ISysAiService _sysAiService;
 
-        public CommonLangController(ICommonLangService CommonLangService)
+        public CommonLangController(ICommonLangService CommonLangService, ISysAiService sysAiService)
         {
             _CommonLangService = CommonLangService;
+            _sysAiService = sysAiService;
         }
 
         /// <summary>
@@ -188,6 +191,41 @@ namespace ZR.Admin.WebApi.Controllers
             }
 
             return SUCCESS(_CommonLangService.ImportCommonLang(list));
+        }
+
+        /// <summary>
+        /// AI 批量翻译界面文案，返回可编辑草稿（不落库）。提示词见 Prompts/system/lang-translate.md。
+        /// </summary>
+        [HttpPost("ai/translate")]
+        [ActionPermissionFilter(Permission = "system:lang:ai")]
+        public async Task<IActionResult> AiTranslate([FromBody] SysAiLangTranslateInput parm)
+        {
+            try
+            {
+                return SUCCESS(await _sysAiService.TranslateLangAsync(parm));
+            }
+            catch (Exception ex)
+            {
+                return ToResponse(ResultCode.FAIL, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// 应用 AI 译文到多语言配置。默认只补空缺，勾选覆盖时才更新已有译文。
+        /// </summary>
+        [HttpPost("ai/apply")]
+        [ActionPermissionFilter(Permission = "system:lang:ai")]
+        [Log(Title = "AI 多语言译文", BusinessType = BusinessType.IMPORT, IsSaveRequestData = false, IsSaveResponseData = true)]
+        public IActionResult AiApply([FromBody] SysAiLangApplyInput parm)
+        {
+            try
+            {
+                return SUCCESS(_sysAiService.ApplyLangTranslation(parm));
+            }
+            catch (Exception ex)
+            {
+                return ToResponse(ResultCode.FAIL, ex.Message);
+            }
         }
 
         /// <summary>

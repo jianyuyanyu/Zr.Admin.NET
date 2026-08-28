@@ -17,15 +17,18 @@ namespace ZR.Admin.WebApi.Controllers
         private ISysTasksQzService _tasksQzService;
         private ITaskSchedulerServer _schedulerServer;
         private readonly ISysTenantService _sysTenantService;
+        private readonly ISysAiService _sysAiService;
 
         public TasksController(
             ISysTasksQzService sysTasksQzService,
             ITaskSchedulerServer taskScheduler,
-            ISysTenantService sysTenantService)
+            ISysTenantService sysTenantService,
+            ISysAiService sysAiService)
         {
             _tasksQzService = sysTasksQzService;
             _schedulerServer = taskScheduler;
             _sysTenantService = sysTenantService;
+            _sysAiService = sysAiService;
         }
 
         private string CurrentTenantId => App.GetCurrentTenantId();
@@ -330,6 +333,52 @@ namespace ZR.Admin.WebApi.Controllers
             var taskResult = await _schedulerServer.RunTaskScheduleAsync(tasksQz, userName);
 
             return ToResponse(taskResult);
+        }
+
+        /// <summary>
+        /// AI 自然语言调度描述转 Cron 表达式。AI 只负责生成，表达式合法性与执行时间由服务端用 Quartz 复核。
+        /// </summary>
+        [HttpPost("ai/cron")]
+        [ActionPermissionFilter(Permission = "monitor:job:ai")]
+        public async Task<IActionResult> AiCron([FromBody] SysAiCronParseInput parm)
+        {
+            try
+            {
+                var result = await _sysAiService.ParseCronAsync(parm);
+                if (!string.IsNullOrWhiteSpace(result.Cron))
+                {
+                    if (!CronExpression.IsValidExpression(result.Cron))
+                    {
+                        return ToResponse(ResultCode.FAIL, $"AI 生成的 cron 表达式不合法（{result.Cron}），请调整描述后重试");
+                    }
+                    result.NextTimes = GetNextFireTimes(result.Cron, 3);
+                }
+                return SUCCESS(result);
+            }
+            catch (Exception ex)
+            {
+                return ToResponse(ResultCode.FAIL, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// 按 Quartz 计算接下来若干次执行时间，便于用户核对 AI 生成的表达式是否符合预期。
+        /// </summary>
+        private static List<string> GetNextFireTimes(string cron, int count)
+        {
+            var times = new List<string>();
+            var expr = new CronExpression(cron);
+            var cursor = DateTimeOffset.Now;
+
+            for (var i = 0; i < count; i++)
+            {
+                var next = expr.GetNextValidTimeAfter(cursor);
+                if (next == null) break;
+
+                times.Add(next.Value.LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss"));
+                cursor = next.Value;
+            }
+            return times;
         }
 
         /// <summary>
