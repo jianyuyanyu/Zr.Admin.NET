@@ -109,6 +109,10 @@ namespace ZR.Model.System.Dto
         public string TenantId { get; set; }
         public int? ExtendDays { get; set; }
         public DateTime? NewExpireTime { get; set; }
+        /// <summary>
+        /// 本次续费金额（选填，用于计费流水记账）。
+        /// </summary>
+        public decimal? Amount { get; set; }
         public string Remark { get; set; }
     }
 
@@ -173,6 +177,10 @@ namespace ZR.Model.System.Dto
         public DateTime? StartTime { get; set; }
         public DateTime? EndTime { get; set; }
         public int? MaxUsersOverride { get; set; }
+        /// <summary>
+        /// 本次计费金额（选填，用于计费流水记账）。
+        /// </summary>
+        public decimal? Amount { get; set; }
         public string Remark { get; set; }
     }
 

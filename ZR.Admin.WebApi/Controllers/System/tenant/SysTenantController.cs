@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using ZR.Model.System;
 using ZR.Model.System.Dto;
 using ZR.Model.System.Tenant;
+using ZR.ServiceCore.SqlSugar;
 
 namespace ZR.Admin.WebApi.Controllers.System.tenant
 {
@@ -14,6 +15,10 @@ namespace ZR.Admin.WebApi.Controllers.System.tenant
     {
         private readonly ISysTenantService _sysTenantService;
 
+        /// <summary>
+        /// saas租户管理接口
+        /// </summary>
+        /// <param name="sysTenantService"></param>
         public SysTenantController(ISysTenantService sysTenantService)
         {
             _sysTenantService = sysTenantService;
@@ -61,6 +66,17 @@ namespace ZR.Admin.WebApi.Controllers.System.tenant
 
             var sent = _sysTenantService.BroadcastToTenants(dto, HttpContext.GetName());
             return SUCCESS(new { Sent = sent });
+        }
+
+        /// <summary>
+        /// 租户数据隔离自检：报告主库共享实体中带 TenantId 但未注册租户过滤的可疑清单。
+        /// </summary>
+        /// <returns></returns>
+        [HttpGet("isolation/check")]
+        [ActionPermissionFilter(Permission = "system:tenant:list")]
+        public IActionResult IsolationCheck()
+        {
+            return SUCCESS(TenantIsolationChecker.Check());
         }
 
         /// <summary>

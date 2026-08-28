@@ -466,6 +466,11 @@ namespace ZR.ServiceCore.Services
                 AppendStep(result, "sync-plan-binding", true, $"已同步{bindingRows}条套餐绑定有效期至{newExpireTime:yyyy-MM-dd HH:mm:ss}");
             }
 
+            var currentPlan = GetCurrentTenantPlan(tenantId);
+            InsertTenantOrder(tenantId, "renew", currentPlan?.PlanCode,
+                DateTime.Now, newExpireTime, dto.Amount, operatorName,
+                dto.ExtendDays.HasValue ? $"续费{dto.ExtendDays}天" : $"续费至{newExpireTime:yyyy-MM-dd}");
+
             SendTenantAdminMessage(tenantId, $"您的租户已续费成功，服务已恢复，到期时间更新为{newExpireTime:yyyy-MM-dd}。");
 
             AppendStep(result, "extend-expire-time", true, $"租户到期时间更新为{newExpireTime:yyyy-MM-dd HH:mm:ss}");
@@ -756,6 +761,10 @@ namespace ZR.ServiceCore.Services
             CacheHelper.Remove($"tenant:plan:perms:{tenantId}");
             SendTenantAdminMessage(tenantId, "您的租户套餐已变更，相关功能权限已同步更新。");
 
+            InsertTenantOrder(tenantId, "plan-assign", planCode,
+                dto.StartTime ?? DateTime.Now, dto.EndTime, dto.Amount, operatorName,
+                string.IsNullOrWhiteSpace(dto.Remark) ? $"分配套餐[{planCode}]" : dto.Remark);
+
             return GetCurrentTenantPlan(tenantId);
         }
 
@@ -968,6 +977,46 @@ namespace ZR.ServiceCore.Services
             return sent;
         }
 
+        /// <summary>
+        /// 套餐到期降级通知：扫描已过期且仍为生效状态（Status=0）的套餐绑定，向租户管理员发送
+        /// 降级通知，绑定置为 Status=2（已处理降级，幂等标记），并写入 degrade 计费流水。
+        /// </summary>
+        public int NotifyExpiredPlanBindings(string operatorName = "system")
+        {
+            EnsureTenantFeatureEnabled();
+
+            var expiredBindings = Context.Queryable<SysTenantPlanBinding>()
+                .Where(x => x.DelFlag == 0 && x.Status == 0 && x.EndTime != null && x.EndTime < DateTime.Now)
+                .ToList();
+
+            var notified = 0;
+            foreach (var binding in expiredBindings)
+            {
+                if (string.Equals(binding.TenantId, App.MainDbConfigId, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                SendTenantAdminMessage(binding.TenantId,
+                    $"您的套餐[{binding.PlanCode}]已于{binding.EndTime:yyyy-MM-dd}到期，已自动降级为默认套餐，部分功能可能受限，如需恢复请联系平台管理员续费升级。");
+
+                // Status=2 标记已处理降级：与 Status=1（被新绑定顶替失效）区分，同时天然幂等
+                Context.Updateable<SysTenantPlanBinding>()
+                    .SetColumns(x => new SysTenantPlanBinding { Status = 2, Update_by = operatorName, Update_time = DateTime.Now })
+                    .Where(x => x.Id == binding.Id)
+                    .ExecuteCommand();
+
+                InsertTenantOrder(binding.TenantId, "degrade", binding.PlanCode,
+                    binding.StartTime, binding.EndTime, null, operatorName,
+                    $"套餐[{binding.PlanCode}]到期自动降级为默认套餐");
+
+                Log.WriteLine(ConsoleColor.Yellow, $"[SysTenantService] 租户[{binding.TenantId}]套餐[{binding.PlanCode}]到期已降级并通知");
+                notified++;
+            }
+
+            return notified;
+        }
+
         public List<TenantExpireReminderDto> GetTenantExpireReminders(int withinDays = 30)
         {
             EnsureDefaultPlans();
@@ -1059,6 +1108,44 @@ namespace ZR.ServiceCore.Services
             if (!App.IsTenantEnabled())
             {
                 throw new CustomException("当前未启用多租户功能（UseTenant != 1）");
+            }
+        }
+
+        /// <summary>
+        /// 写入套餐计费流水。流水失败仅记日志不阻断主流程（业务变更已成功，账本可事后补录）。
+        /// </summary>
+        /// <param name="tenantId">租户标识</param>
+        /// <param name="actionType">plan-assign / renew / degrade</param>
+        /// <param name="planCode">涉及套餐编码</param>
+        /// <param name="startTime">生效开始时间</param>
+        /// <param name="endTime">到期时间</param>
+        /// <param name="amount">计费金额，可空</param>
+        /// <param name="operatorName">操作人</param>
+        /// <param name="remark">备注</param>
+        private void InsertTenantOrder(string tenantId, string actionType, string planCode,
+            DateTime? startTime, DateTime? endTime, decimal? amount, string operatorName, string remark)
+        {
+            try
+            {
+                var orderNo = $"TO{DateTime.Now:yyyyMMddHHmmssfff}{Guid.NewGuid().ToString("N")[..6].ToUpper()}";
+                Context.Insertable(new SysTenantOrder
+                {
+                    OrderNo = orderNo,
+                    TenantId = tenantId,
+                    ActionType = actionType,
+                    PlanCode = planCode,
+                    StartTime = startTime,
+                    EndTime = endTime,
+                    Amount = amount,
+                    OperatorName = operatorName,
+                    Remark = remark,
+                    Create_by = operatorName,
+                    Create_time = DateTime.Now
+                }).ExecuteCommand();
+            }
+            catch (Exception ex)
+            {
+                Log.WriteLine(ConsoleColor.Red, $"[SysTenantService] 租户[{tenantId}]计费流水写入失败({actionType}): {ex.Message}");
             }
         }
 

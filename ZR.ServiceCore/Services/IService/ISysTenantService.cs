@@ -196,5 +196,13 @@ namespace ZR.ServiceCore.Services
         /// <param name="operatorName">操作人，默认 system（定时任务）</param>
         /// <returns>本次发送提醒的租户数量</returns>
         int RemindExpiringTenants(string operatorName = "system");
+
+        /// <summary>
+        /// 套餐到期降级通知：扫描已过期（EndTime &lt; now）且未处理的生效套餐绑定，向租户管理员
+        /// 发送降级为默认套餐的站内信，绑定标记为已处理并写入 degrade 计费流水。供定时任务调用。
+        /// </summary>
+        /// <param name="operatorName">操作人，默认 system（定时任务）</param>
+        /// <returns>本次处理降级通知的绑定数量</returns>
+        int NotifyExpiredPlanBindings(string operatorName = "system");
     }
 }

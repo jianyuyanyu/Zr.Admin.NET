@@ -23,6 +23,9 @@ namespace ZR.ServiceCore.Services
             var count = _tenantService.RemindExpiringTenants("system");
             Console.ForegroundColor = ConsoleColor.Cyan;
             Console.WriteLine($"[定时任务] 租户到期提醒：本次发送 {count} 个租户");
+
+            var degraded = _tenantService.NotifyExpiredPlanBindings("system");
+            Console.WriteLine($"[定时任务] 套餐到期降级通知：本次处理 {degraded} 个绑定");
             Console.ResetColor();
         }
     }

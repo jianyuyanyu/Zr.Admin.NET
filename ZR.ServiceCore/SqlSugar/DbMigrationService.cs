@@ -1,5 +1,4 @@
 using Infrastructure;
-using Microsoft.AspNetCore.Hosting;
 using SqlSugar.IOC;
 using System.Reflection;
 using ZR.Model;
@@ -45,6 +44,7 @@ namespace ZR.ServiceCore.SqlSugar
             typeof(SysTenantPlan),
             typeof(SysTenantPlanBinding),
             typeof(SysTenantPlanMenu),
+            typeof(SysTenantOrder),
             typeof(CommonLang),
             typeof(GenTable),
             typeof(GenTableColumn),
