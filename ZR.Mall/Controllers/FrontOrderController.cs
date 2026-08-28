@@ -5,9 +5,9 @@ using Microsoft.AspNetCore.Mvc;
 using System.Text.RegularExpressions;
 using ZR.Common;
 using ZR.Mall.Model.Dto;
-using ZR.Mall.Payment;
 using ZR.Mall.Service.IService;
 using ZR.Model.Models;
+using ZR.ServiceCore.Payment;
 using ZR.ServiceCore.Services;
 
 //创建时间：2026-07-25
@@ -23,14 +23,14 @@ namespace ZR.Mall.Controllers
     {
         private readonly IOMSOrderService _OMSOrderService;
         private readonly ISmsCodeLogService _smsCodeLogService;
-        private readonly WechatPayService _wechatPayService;
+        private readonly WechatPayGateway _wechatPayGateway;
         private readonly IOMSPaymentService _paymentService;
 
-        public FrontOrderController(IOMSOrderService OMSOrderService, ISmsCodeLogService smsCodeLogService, WechatPayService wechatPayService, IOMSPaymentService paymentService)
+        public FrontOrderController(IOMSOrderService OMSOrderService, ISmsCodeLogService smsCodeLogService, WechatPayGateway wechatPayGateway, IOMSPaymentService paymentService)
         {
             _OMSOrderService = OMSOrderService;
             _smsCodeLogService = smsCodeLogService;
-            _wechatPayService = wechatPayService;
+            _wechatPayGateway = wechatPayGateway;
             _paymentService = paymentService;
         }
 
@@ -83,7 +83,7 @@ namespace ZR.Mall.Controllers
             {
                 return ToResponse(ResultCode.PARAM_ERROR, "参数不完整");
             }
-            if (!_wechatPayService.Enabled)
+            if (!_wechatPayGateway.Enabled)
             {
                 // 模拟支付通道（开发环境）
                 var mockOrder = _OMSOrderService.PayOrder(dto.OrderNo, dto.Phone);
@@ -112,15 +112,15 @@ namespace ZR.Mall.Controllers
             WechatPrepayResult prepay;
             if (channel == "miniprogram")
             {
-                prepay = await _wechatPayService.CreateJSApiPayAsync(order.OrderNo, desc, order.PayAmount, dto.OpenId);
+                prepay = await _wechatPayGateway.CreateJSApiPayAsync(order.OrderNo, desc, order.PayAmount, dto.OpenId);
             }
             else if (channel == "app")
             {
-                prepay = await _wechatPayService.CreateAppPayAsync(order.OrderNo, desc, order.PayAmount);
+                prepay = await _wechatPayGateway.CreateAppPayAsync(order.OrderNo, desc, order.PayAmount);
             }
             else
             {
-                prepay = await _wechatPayService.CreateH5PayAsync(order.OrderNo, desc, order.PayAmount, ip);
+                prepay = await _wechatPayGateway.CreateH5PayAsync(order.OrderNo, desc, order.PayAmount, ip);
             }
 
             // 记录预支付流水（状态=Prepay），支付成功回调时更新为 Paid
@@ -163,7 +163,7 @@ namespace ZR.Mall.Controllers
             {
                 return ToResponse(ResultCode.PARAM_ERROR, "code 不能为空");
             }
-            var openId = await _wechatPayService.GetOpenIdAsync(code);
+            var openId = await _wechatPayGateway.GetOpenIdAsync(code);
             return SUCCESS(new { openId });
         }
 
@@ -185,7 +185,7 @@ namespace ZR.Mall.Controllers
             }
             try
             {
-                var ok = _wechatPayService.HandleNotify(timestamp, nonce, signature, serial, body);
+                var ok = _wechatPayGateway.HandleNotify(timestamp, nonce, signature, serial, body);
                 if (ok)
                 {
                     return new JsonResult(new { code = "SUCCESS", message = "成功" });

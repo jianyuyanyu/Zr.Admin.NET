@@ -1178,6 +1178,60 @@ namespace ZR.ServiceCore.Services
         }
 
         /// <summary>
+        /// 按流水单号查询租户计费流水。
+        /// </summary>
+        public SysTenantOrder GetTenantOrderByNo(string orderNo)
+        {
+            if (string.IsNullOrWhiteSpace(orderNo)) return null;
+            return Context.Queryable<SysTenantOrder>()
+                .Where(x => x.OrderNo == orderNo)
+                .First();
+        }
+
+        /// <summary>
+        /// 将计费流水标记为已支付（CAS：仅 PayStatus=0 时生效，防微信重推回调重复入账）。
+        /// </summary>
+        public bool MarkTenantOrderPaid(string orderNo, string transactionId, string payChannel = "wechat")
+        {
+            var rows = Context.Updateable<SysTenantOrder>()
+                .SetColumns(x => new SysTenantOrder
+                {
+                    PayStatus = 1,
+                    PayChannel = payChannel,
+                    TransactionId = transactionId,
+                    PayTime = DateTime.Now,
+                    Update_time = DateTime.Now
+                })
+                .Where(x => x.OrderNo == orderNo && x.PayStatus == 0)
+                .ExecuteCommand();
+            return rows > 0;
+        }
+
+        /// <summary>
+        /// 创建租户在线续费待支付流水（支付闭环第一步）。
+        /// 金额、时长、租户以流水为准，支付回调只认单号。
+        /// </summary>
+        public SysTenantOrder CreateTenantRenewOrder(string tenantId, int durationDays, decimal amount, string operatorName)
+        {
+            var orderNo = $"TO{DateTime.Now:yyyyMMddHHmmssfff}{Guid.NewGuid().ToString("N")[..6].ToUpper()}";
+            var order = new SysTenantOrder
+            {
+                OrderNo = orderNo,
+                TenantId = tenantId,
+                ActionType = "renew",
+                Amount = amount,
+                OperatorName = operatorName,
+                Remark = $"在线续费{durationDays}天（待支付）",
+                DurationDays = durationDays,
+                PayStatus = 0,
+                Create_by = operatorName,
+                Create_time = DateTime.Now
+            };
+            Context.Insertable(order).ExecuteCommand();
+            return order;
+        }
+
+        /// <summary>
         /// 写入套餐计费流水。流水失败仅记日志不阻断主流程（业务变更已成功，账本可事后补录）。
         /// </summary>
         /// <param name="tenantId">租户标识</param>

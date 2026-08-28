@@ -58,5 +58,33 @@ namespace ZR.Model.System.Tenant
         /// </summary>
         [SugarColumn(Length = 64)]
         public string OperatorName { get; set; }
+
+        /// <summary>
+        /// 支付状态：0=待支付 1=已支付（在线支付单使用；线下记账直接置已支付或留空）
+        /// </summary>
+        [SugarColumn(ExtendedAttribute = ProteryConstant.NOTNULL)]
+        public int PayStatus { get; set; }
+
+        /// <summary>
+        /// 支付渠道：wechat 等
+        /// </summary>
+        [SugarColumn(Length = 32)]
+        public string PayChannel { get; set; }
+
+        /// <summary>
+        /// 第三方支付交易号（微信 transaction_id）
+        /// </summary>
+        [SugarColumn(Length = 64)]
+        public string TransactionId { get; set; }
+
+        /// <summary>
+        /// 本次续费时长（天），在线续费下单时写入，支付成功后据此执行续费
+        /// </summary>
+        public int? DurationDays { get; set; }
+
+        /// <summary>
+        /// 支付完成时间
+        /// </summary>
+        public DateTime? PayTime { get; set; }
     }
 }

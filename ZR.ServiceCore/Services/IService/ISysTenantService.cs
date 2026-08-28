@@ -204,5 +204,33 @@ namespace ZR.ServiceCore.Services
         /// <param name="operatorName">操作人，默认 system（定时任务）</param>
         /// <returns>本次处理降级通知的绑定数量</returns>
         int NotifyExpiredPlanBindings(string operatorName = "system");
+
+        /// <summary>
+        /// 按流水单号查询租户计费流水（支付回调/状态查询用）。
+        /// </summary>
+        /// <param name="orderNo">流水单号（TO 前缀）</param>
+        /// <returns></returns>
+        SysTenantOrder GetTenantOrderByNo(string orderNo);
+
+        /// <summary>
+        /// 将计费流水标记为已支付（回调幂等判断后调用）：置 PayStatus=1、渠道、交易号、支付时间。
+        /// 仅 PayStatus=0 时生效（CAS），返回是否更新成功。
+        /// </summary>
+        /// <param name="orderNo">流水单号</param>
+        /// <param name="transactionId">第三方交易号</param>
+        /// <param name="payChannel">支付渠道，默认 wechat</param>
+        /// <returns></returns>
+        bool MarkTenantOrderPaid(string orderNo, string transactionId, string payChannel = "wechat");
+
+        /// <summary>
+        /// 创建租户在线续费待支付流水（支付闭环第一步）。
+        /// 金额、时长、租户以流水为准，支付回调只认单号。
+        /// </summary>
+        /// <param name="tenantId">租户标识</param>
+        /// <param name="durationDays">续费时长（天）</param>
+        /// <param name="amount">应付金额（元）</param>
+        /// <param name="operatorName">操作人</param>
+        /// <returns>已落库的待支付流水（含单号）</returns>
+        SysTenantOrder CreateTenantRenewOrder(string tenantId, int durationDays, decimal amount, string operatorName);
     }
 }

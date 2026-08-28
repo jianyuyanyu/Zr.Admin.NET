@@ -4,30 +4,26 @@ using SKIT.FlurlHttpClient.Wechat.TenpayV3;
 using SKIT.FlurlHttpClient.Wechat.TenpayV3.Events;
 using SKIT.FlurlHttpClient.Wechat.TenpayV3.Models;
 using SKIT.FlurlHttpClient.Wechat.TenpayV3.Settings;
-using ZR.Common;
-using ZR.Mall.Enum;
-using ZR.Mall.Service.IService;
 
-namespace ZR.Mall.Payment
+namespace ZR.ServiceCore.Payment
 {
     /// <summary>
-    /// 微信支付 V3（H5）封装。平台统一商户号模式。
-    /// - 发起支付：创建 H5 预付单，返回 h5_url 供前端吊起。
-    /// - 异步回调：验签 + 解密，成功后调用订单服务的"按订单号支付"。
-    /// 状态机与库存逻辑全部在 OMSOrderService，本服务只负责支付渠道对接。
-    /// 配置来源：appsettings.json 的 WechatPay 节点（AppSettings.Get 绑定）。
-    /// 基于 SKIT.FlurlHttpClient.Wechat.TenpayV3 3.16.0。
+    /// 微信支付 V3 渠道网关（平台统一商户号模式）。只负责支付渠道对接，不含任何业务订单逻辑：
+    /// - 下单：H5 / JSAPI / App 三通道，返回各端吊起支付所需参数；
+    /// - 回调：验签 + 解密，按商户单号分发给 IWechatPayNotifyHandler 实现（商城订单/租户续费等各自注册）。
+    /// 配置来源：appsettings.json 的 WechatPay 节点。基于 SKIT.FlurlHttpClient.Wechat.TenpayV3 3.16.0。
+    /// 注意：构造注入了 Scoped 的回调 handler 集合，故本服务必须为 Scoped（不可 Singleton）。
     /// </summary>
-    [AppService(ServiceType = typeof(WechatPayService))]
-    public class WechatPayService
+    [AppService(ServiceType = typeof(WechatPayGateway), ServiceLifetime = LifeTime.Scoped)]
+    public class WechatPayGateway
     {
         private readonly WechatPayOptions _options;
-        private readonly IOMSOrderService _orderService;
+        private readonly IEnumerable<IWechatPayNotifyHandler> _notifyHandlers;
 
-        public WechatPayService(IOMSOrderService orderService)
+        public WechatPayGateway(IEnumerable<IWechatPayNotifyHandler> notifyHandlers)
         {
             _options = AppSettings.Get<WechatPayOptions>("WechatPay") ?? new WechatPayOptions();
-            _orderService = orderService;
+            _notifyHandlers = notifyHandlers ?? Enumerable.Empty<IWechatPayNotifyHandler>();
         }
 
         public bool Enabled => _options.Enabled;
@@ -84,11 +80,7 @@ namespace ZR.Mall.Payment
 
             // v3.16.0 底层调用：CreateFlurlRequest + SendFlurlRequestAsJsonAsync
             var flurlReq = client.CreateFlurlRequest(request, System.Net.Http.HttpMethod.Post, new object[] { "pay", "transactions", "h5" });
-            var h5Response = await client.SendFlurlRequestAsJsonAsync<CreatePayTransactionH5Response>(flurlReq, request, System.Threading.CancellationToken.None);
-            if (!string.IsNullOrEmpty(h5Response.ErrorCode))
-            {
-                throw new CustomException("微信支付下单失败：" + h5Response.ErrorMessage);
-            }
+            var h5Response = await SendRequestAsync<CreatePayTransactionH5Response>(client, flurlReq, request, "微信H5支付下单");
             return new WechatPrepayResult
             {
                 OrderNo = orderNo,
@@ -126,11 +118,7 @@ namespace ZR.Mall.Payment
             };
 
             var flurlReq = client.CreateFlurlRequest(request, System.Net.Http.HttpMethod.Post, new object[] { "pay", "transactions", "jsapi" });
-            var jsapiResponse = await client.SendFlurlRequestAsJsonAsync<CreatePayTransactionJsapiResponse>(flurlReq, request, System.Threading.CancellationToken.None);
-            if (!string.IsNullOrEmpty(jsapiResponse.ErrorCode))
-            {
-                throw new CustomException("微信小程序支付下单失败：" + jsapiResponse.ErrorMessage);
-            }
+            var jsapiResponse = await SendRequestAsync<CreatePayTransactionJsapiResponse>(client, flurlReq, request, "微信小程序支付下单");
             return BuildClientPayParams(orderNo, "miniProgram", appId, null, jsapiResponse.PrepayId, "prepay_id=" + jsapiResponse.PrepayId);
         }
 
@@ -153,11 +141,7 @@ namespace ZR.Mall.Payment
             };
 
             var flurlReq = client.CreateFlurlRequest(request, System.Net.Http.HttpMethod.Post, new object[] { "pay", "transactions", "app" });
-            var appResponse = await client.SendFlurlRequestAsJsonAsync<CreatePayTransactionAppResponse>(flurlReq, request, System.Threading.CancellationToken.None);
-            if (!string.IsNullOrEmpty(appResponse.ErrorCode))
-            {
-                throw new CustomException("微信App支付下单失败：" + appResponse.ErrorMessage);
-            }
+            var appResponse = await SendRequestAsync<CreatePayTransactionAppResponse>(client, flurlReq, request, "微信App支付下单");
             // App 端 package 固定为 Sign=WXPay
             return BuildClientPayParams(orderNo, "app", _options.AppId, _options.MerchantId, appResponse.PrepayId, "Sign=WXPay");
         }
@@ -204,8 +188,7 @@ namespace ZR.Mall.Payment
         }
 
         /// <summary>
-        /// 微信小程序：用 wx.login 拿到的 code 换取用户 OpenId（jscode2session）。
-        /// 用于游客在小程序内支付时补全 JSAPI 所需的 OpenId。无需额外 NuGet 包。
+        /// 微信小程序：用 wx.login 拿到的 code 换取用户 OpenId（jscode2session）。无需额外 NuGet 包。
         /// </summary>
         public async Task<string> GetOpenIdAsync(string code)
         {
@@ -228,7 +211,8 @@ namespace ZR.Mall.Payment
         }
 
         /// <summary>
-        /// 处理微信支付异步回调。返回 true 表示验签+解密成功并已完成订单状态流转。
+        /// 处理微信支付异步回调：验签 + 解密，成功交易按商户单号分发给注册的 IWechatPayNotifyHandler。
+        /// 返回 true 表示验签成功且分发完成（业务处理失败会抛异常向上传递，由回调端记日志）。
         /// </summary>
         public bool HandleNotify(string timestamp, string nonce, string signature, string serial, string body)
         {
@@ -248,7 +232,7 @@ namespace ZR.Mall.Payment
             {
                 var resource = client.DecryptEventResource<TransactionResource>(callbackModel);
 
-                // 安全校验：未支付成功、金额缺失均视为非法回调，拒绝流转订单状态
+                // 安全校验：未支付成功、金额缺失均视为非法回调，直接拒绝
                 if (!string.Equals(resource.TradeState, "SUCCESS", System.StringComparison.OrdinalIgnoreCase))
                 {
                     Log.WriteLine(ConsoleColor.Yellow, $"[WechatPay] 回调交易状态非 SUCCESS(={resource.TradeState})，已忽略。OutTradeNo={resource.OutTradeNumber}");
@@ -260,9 +244,152 @@ namespace ZR.Mall.Payment
                     return false;
                 }
 
-                _orderService.PayOrderByOrderNo(resource.OutTradeNumber, PayTypeEnum.Wechat, resource.TransactionId, body, resource.Amount.Total);
+                var handler = _notifyHandlers.FirstOrDefault(h => h.CanHandle(resource.OutTradeNumber));
+                if (handler == null)
+                {
+                    Log.WriteLine(ConsoleColor.Red, $"[WechatPay] 无 handler 认领商户单号 {resource.OutTradeNumber}，请检查 IWechatPayNotifyHandler 注册");
+                    return false;
+                }
+
+                handler.HandlePaid(resource.OutTradeNumber, resource.TransactionId, resource.Amount.Total);
             }
             return true;
+        }
+
+        /// <summary>
+        /// 统一执行微信支付接口请求：业务错误码转业务异常，底层异常（签名失败/证书不匹配/网络等）
+        /// 附加内层原因后抛出，便于定位配置问题（如私钥格式错误、证书序列号不匹配）。
+        /// </summary>
+        private async Task<TResponse> SendRequestAsync<TResponse>(WechatTenpayClient client, Flurl.Http.IFlurlRequest flurlReq, object data, string actionName)
+            where TResponse : WechatTenpayResponse, new()
+        {
+            try
+            {
+                var response = await client.SendFlurlRequestAsJsonAsync<TResponse>(flurlReq, data, System.Threading.CancellationToken.None);
+                if (!string.IsNullOrEmpty(response.ErrorCode))
+                {
+                    throw new CustomException($"{actionName}失败：{response.ErrorCode} {response.ErrorMessage}");
+                }
+                return response;
+            }
+            catch (CustomException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                var detail = ex.InnerException == null
+                    ? ex.Message
+                    : $"{ex.Message}（内部原因：{ex.InnerException.Message}）";
+                throw new CustomException($"{actionName}失败，请检查 WechatPay 配置（商户号/证书序列号/商户私钥 PEM 格式）：{detail}");
+            }
+        }
+
+        /// <summary>
+        /// 构造一笔模拟的微信支付成功回调（仅本地联调用，无商户号时验证回调全链路）。
+        /// 使用与真实回调完全相同的密钥配置（APIv3Key 加密 + 配置中的公钥验签模式）生成事件体与签名头，
+        /// 因此后续 HandleNotify 的验签、解密、分发、金额比对、幂等、续费等逻辑与线上完全一致，
+        /// 仅"微信服务器"是本地模拟。
+        /// </summary>
+        /// <param name="orderNo">商户单号</param>
+        /// <param name="transactionId">模拟的交易号</param>
+        /// <param name="totalFen">支付金额（分）</param>
+        /// <returns>事件体与四个回调头</returns>
+        public WechatMockNotify BuildMockNotify(string orderNo, string transactionId, int totalFen)
+        {
+            if (string.IsNullOrWhiteSpace(_options.MerchantV3Key))
+            {
+                throw new CustomException("未配置 WechatPay:MerchantV3Key，无法生成模拟回调");
+            }
+            if (string.IsNullOrWhiteSpace(_options.MerchantCertificatePrivateKey))
+            {
+                throw new CustomException("未配置 WechatPay:MerchantCertificatePrivateKey，无法生成模拟回调签名");
+            }
+
+            var resource = new
+            {
+                appid = string.IsNullOrEmpty(_options.MiniProgramAppId) ? _options.AppId : _options.MiniProgramAppId,
+                mchid = _options.MerchantId,
+                out_trade_no = orderNo,
+                transaction_id = transactionId,
+                trade_type = "MWEB",
+                trade_state = "SUCCESS",
+                trade_state_desc = "支付成功",
+                bank_type = "OTHERS",
+                attach = "",
+                success_time = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:sszzz"),
+                payer = new { openid = "mock_openid" },
+                amount = new { total = totalFen, currency = "CNY", payer_total = totalFen, payer_currency = "CNY" }
+            };
+
+            var body = new
+            {
+                id = Guid.NewGuid().ToString("N"),
+                create_time = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:sszzz"),
+                resource_type = "encrypt-resource",
+                event_type = "TRANSACTION.SUCCESS",
+                summary = "支付成功",
+                resource = new
+                {
+                    algorithm = "AEAD_AES_256_GCM",
+                    ciphertext = "",
+                    associated_data = "transaction",
+                    nonce = Guid.NewGuid().ToString("N")[..12]
+                }
+            };
+
+            // AES-GCM 加密 resource.ciphertext（APIv3 规范：ciphertext = Base64(AES-GCM(明文, key, nonce, aad))）
+            var plainBytes = System.Text.Encoding.UTF8.GetBytes(Newtonsoft.Json.JsonConvert.SerializeObject(resource));
+            var cipherBytes = new byte[plainBytes.Length + 16];
+            var tag = new byte[16];
+            var nonceBytes = System.Text.Encoding.UTF8.GetBytes(body.resource.nonce);
+            var aadBytes = System.Text.Encoding.UTF8.GetBytes(body.resource.associated_data);
+            using (var gcm = new System.Security.Cryptography.AesGcm(System.Text.Encoding.UTF8.GetBytes(_options.MerchantV3Key), 16))
+            {
+                gcm.Encrypt(nonceBytes, plainBytes, cipherBytes.AsSpan(0, plainBytes.Length), tag, aadBytes);
+            }
+            var cipherWithTag = new byte[plainBytes.Length + 16];
+            Buffer.BlockCopy(cipherBytes, 0, cipherWithTag, 0, plainBytes.Length);
+            Buffer.BlockCopy(tag, 0, cipherWithTag, plainBytes.Length, 16);
+
+            var finalBody = new
+            {
+                body.id,
+                body.create_time,
+                body.resource_type,
+                body.event_type,
+                body.summary,
+                resource = new
+                {
+                    body.resource.algorithm,
+                    ciphertext = Convert.ToBase64String(cipherWithTag),
+                    body.resource.associated_data,
+                    body.resource.nonce
+                }
+            };
+            var json = Newtonsoft.Json.JsonConvert.SerializeObject(finalBody);
+
+            // 回调签名：timestamp\n nonce\n body\n（使用商户 API 私钥）
+            var timestamp = DateTimeOffset.Now.ToUnixTimeSeconds().ToString();
+            var nonce = Guid.NewGuid().ToString("N");
+            var message = $"{timestamp}\n{nonce}\n{json}\n";
+            string signature;
+            using (var rsa = System.Security.Cryptography.RSA.Create())
+            {
+                rsa.ImportFromPem(_options.MerchantCertificatePrivateKey.ToCharArray());
+                signature = Convert.ToBase64String(rsa.SignData(System.Text.Encoding.UTF8.GetBytes(message),
+                    System.Security.Cryptography.HashAlgorithmName.SHA256,
+                    System.Security.Cryptography.RSASignaturePadding.Pkcs1));
+            }
+
+            return new WechatMockNotify
+            {
+                Body = json,
+                Timestamp = timestamp,
+                Nonce = nonce,
+                Signature = signature,
+                Serial = _options.MerchantCertificateSerialNumber
+            };
         }
 
         private static string Truncate(string s, int maxByte)
@@ -274,6 +401,27 @@ namespace ZR.Mall.Payment
         }
     }
 
+    /// <summary>
+    /// 模拟微信支付回调的请求内容（本地联调用）
+    /// </summary>
+    public class WechatMockNotify
+    {
+        /// <summary>事件体 JSON</summary>
+        public string Body { get; set; }
+
+        /// <summary>Wechatpay-Timestamp 头</summary>
+        public string Timestamp { get; set; }
+
+        /// <summary>Wechatpay-Nonce 头</summary>
+        public string Nonce { get; set; }
+
+        /// <summary>Wechatpay-Signature 头</summary>
+        public string Signature { get; set; }
+
+        /// <summary>Wechatpay-Serial 头</summary>
+        public string Serial { get; set; }
+    }
+
     public class WechatPrepayResult
     {
         public string OrderNo { get; set; }
@@ -281,15 +429,12 @@ namespace ZR.Mall.Payment
         public string H5Url { get; set; }
         /// <summary>支付通道：h5 / miniProgram / app</summary>
         public string Channel { get; set; }
-        /// <summary>小程序/App 的 AppId</summary>
         public string AppId { get; set; }
         /// <summary>App 支付商户号（partnerid）</summary>
         public string PartnerId { get; set; }
         /// <summary>预付单号 prepay_id</summary>
         public string PrepayId { get; set; }
-        /// <summary>随机串</summary>
         public string NonceStr { get; set; }
-        /// <summary>时间戳（秒）</summary>
         public string TimeStamp { get; set; }
         /// <summary>package 字段：小程序 prepay_id=xxx；App 固定 Sign=WXPay</summary>
         public string Package { get; set; }

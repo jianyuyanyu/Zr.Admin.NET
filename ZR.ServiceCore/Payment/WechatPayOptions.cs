@@ -1,4 +1,4 @@
-namespace ZR.Mall.Payment
+namespace ZR.ServiceCore.Payment
 {
     /// <summary>
     /// 微信支付 V3 配置（平台统一商户号，非多租户商户配置）。
@@ -63,8 +63,7 @@ namespace ZR.Mall.Payment
         public string MiniProgramAppId { get; set; }
 
         /// <summary>
-        /// 微信小程序 AppSecret（换取用户 OpenId 用，见 shopping/front/order/wx-openid）。
-        /// 生产环境应通过密钥管理注入，勿明文提交。
+        /// 微信小程序 AppSecret（换取用户 OpenId 用）。生产环境应通过密钥管理注入，勿明文提交。
         /// </summary>
         public string MiniProgramSecret { get; set; }
     }
