@@ -1,7 +1,7 @@
-using Infrastructure;
 using Infrastructure.Attribute;
+using ZR.ServiceCore.Services;
 
-namespace ZR.ServiceCore.Services
+namespace ZR.ServiceCore.Job
 {
     /// <summary>
     /// 租户到期前阶梯提醒任务。

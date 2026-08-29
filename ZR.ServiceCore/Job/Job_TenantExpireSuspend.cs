@@ -1,6 +1,7 @@
 using Infrastructure.Attribute;
+using ZR.ServiceCore.Services;
 
-namespace ZR.ServiceCore.Services
+namespace ZR.ServiceCore.Job
 {
     /// <summary>
     /// 租户到期自动停服任务。
