@@ -413,16 +413,6 @@ namespace ZR.Workflow.Service
         }
 
         /// <summary>
-        /// 写入连线：将 DTO 中的 SourceNodeId/TargetNodeId 按 <paramref name="nodeMap"/> 重映射为新建节点的真实 Id 后落库。
-        /// nodeMap 为「客户端节点Id → 新 NodeId」映射（新增/编辑场景）或「源 NodeId → 新 NodeId」映射（复制场景）。
-        ///
-        /// 落库前过滤三类脏数据：
-        /// - 任一端未命中 nodeMap（指向不存在的节点）；
-        /// - 端点为 0（前端未填）；
-        /// - 自环（SourceNodeId == TargetNodeId，引擎无意义、且会引发死循环）。
-        /// 无连线则空操作。
-        /// </summary>
-        /// <summary>
         /// 提交前校验：link 为流程串联的唯一事实来源，故每个「非结束节点」必须至少有一条有效出边，
         /// 否则运行态会从该节点断链卡死。有效出边 = SourceNodeId &gt; 0 且 != TargetNodeId（与 InsertLinks 过滤口径一致）。
         /// 结束节点（NodeType=3）允许无出边。校验在事务外执行，避免脏数据进事务。
@@ -532,6 +522,14 @@ namespace ZR.Workflow.Service
             return n != null && !string.IsNullOrEmpty(n.NodeName) ? n.NodeName : id.ToString();
         }
 
+        /// <summary>
+        /// 写入连线：将 DTO 中的 SourceNodeId/TargetNodeId 按 <paramref name="nodeMap"/> 重映射为新建节点的真实 Id 后落库。
+        /// nodeMap 为「客户端节点Id → 新 NodeId」映射，由 InsertNodes 返回；复制场景不走这里，见 CloneLinksToNewFlow。
+        ///
+        /// 落库前过滤脏数据：两端必须 &gt; 0 且不能自环（自环对引擎无意义且会引发死循环）。
+        /// 未命中 nodeMap 的一端保留 DTO 原值，前端新增节点用的是负数临时 id，因此会一并被 &gt; 0 过滤掉。
+        /// 无连线或过滤后为空则空操作。
+        /// </summary>
         private void InsertLinks(long flowId, List<WfNodeLinkDto> links, string userName, Dictionary<long, long> nodeMap)
         {
             if (links == null || links.Count == 0) return;

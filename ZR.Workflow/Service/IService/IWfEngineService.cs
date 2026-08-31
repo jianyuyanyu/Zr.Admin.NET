@@ -21,6 +21,7 @@ namespace ZR.Workflow.Service.IService
         /// <param name="taskId">任务Id</param>
         /// <param name="opinion">审批意见</param>
         /// <param name="operatorId">操作人 userId（须为该任务的 AssigneeId）</param>
+        /// <param name="formContent"></param>
         void Approve(long taskId, string opinion, long operatorId, string formContent = null);
 
         /// <summary>
@@ -35,12 +36,17 @@ namespace ZR.Workflow.Service.IService
         /// 重新提交：驳回后由申请人修改表单再次发起，回到首节点重新审批
         /// </summary>
         /// <param name="operatorId">操作人 userId（须为原申请人 ApplyUserId）</param>
+        /// <param name="formContent">表单内容</param>
+        /// <param name="attachment">附件内容</param>
+        /// <param name="instanceId">流程实例Id</param>
+        /// <param name="title">流程标题</param>
         void Resubmit(long instanceId, string formContent, string attachment, string title, long operatorId);
 
         /// <summary>
         /// 撤回（仅当前节点未处理时）
         /// </summary>
         /// <param name="operatorId">操作人 userId（须为原申请人 ApplyUserId）</param>
+        /// <param name="instanceId">流程实例Id</param>
         void Withdraw(long instanceId, long operatorId);
 
         /// <summary>
@@ -102,12 +108,18 @@ namespace ZR.Workflow.Service.IService
         /// </summary>
         /// <param name="nodeId">目标节点</param>
         /// <param name="targetUserId">改派目标用户 userId</param>
+        /// <param name="instanceId">流程实例Id</param>
+        /// <param name="operatorId">操作管理员 userId</param>
+        /// <param name="opinion">改派说明</param>
         Task AdminReassign(long instanceId, long nodeId, long targetUserId, long operatorId, string opinion);
 
         /// <summary>
         /// 管理员跳转节点：把卡住的实例直接跳到指定节点重新激活
         /// </summary>
+        /// <param name="instanceId">流程实例Id</param>
         /// <param name="targetNodeId">跳转目标节点（必须存在且非结束节点）</param>
+        /// <param name="operatorId">操作管理员 userId</param>
+        /// <param name="opinion">跳转说明</param>
         Task AdminJump(long instanceId, long targetNodeId, long operatorId, string opinion);
 
         /// <summary>

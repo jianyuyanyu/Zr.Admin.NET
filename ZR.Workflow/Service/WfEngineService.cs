@@ -871,7 +871,7 @@ namespace ZR.Workflow.Service
         #region 私有辅助
 
         /// <summary>
-        /// <see cref="BaseService{T}.UseTran(Action)"/> + 失败包装的统一入口。
+        /// <see cref="ZR.Repository.BaseRepository{T}.UseTran(Action)"/> + 失败包装的统一入口。
         /// 事务回滚或异常时抛出带 <paramref name="errorLabel"/> 的 CustomException，
         /// 原 errorMessage 透传便于排障。所有公共入口均通过此方法走事务。
         /// 节点 Webhook 改为"Outbox 事务发件箱"：触发时在事务体内写一条 Pending 投递记录
@@ -1621,7 +1621,7 @@ namespace ZR.Workflow.Service
             SyncActiveNodeId(instance);
         }
 
-        #region 管理员运维操作（P0：终止 / 挂起 / 恢复 / 改派 / 跳转）
+        #region 管理员运维操作（终止 / 挂起 / 恢复 / 改派 / 跳转）
 
         /// <summary>
         /// 管理员强制终止 / 作废流程（不可逆）。把所有未完成任务置为 Skipped，实例置 Terminated，
@@ -1630,7 +1630,7 @@ namespace ZR.Workflow.Service
         /// <param name="instanceId">流程实例Id</param>
         /// <param name="operatorId">操作管理员 userId</param>
         /// <param name="opinion">终止原因（可选）</param>
-        public async Task AdminTerminate(long instanceId, long operatorId, string opinion)
+        public Task AdminTerminate(long instanceId, long operatorId, string opinion)
         {
             var instance = Context.Queryable<WfFlowInstance>().First(i => i.InstanceId == instanceId)
                 ?? throw new CustomException("流程实例不存在");
@@ -1673,13 +1673,14 @@ namespace ZR.Workflow.Service
             var msg = $"流程【{def.FlowName}】已被管理员{op.NickName}终止";
             NotifyUser(instance.ApplyUserId, msg);
             NotifyUserIds(openTaskIds, msg);
+            return Task.CompletedTask;
         }
 
         /// <summary>
         /// 管理员挂起流程（暂停流转，等待恢复）。仅运行中实例可挂起；挂起期间普通审批操作应被前端隐藏，
         /// 本方法仅置状态，不改动任务。恢复请调 <see cref="AdminResume"/>。
         /// </summary>
-        public async Task AdminSuspend(long instanceId, long operatorId, string opinion)
+        public Task AdminSuspend(long instanceId, long operatorId, string opinion)
         {
             var instance = Context.Queryable<WfFlowInstance>().First(i => i.InstanceId == instanceId)
                 ?? throw new CustomException("流程实例不存在");
@@ -1698,12 +1699,13 @@ namespace ZR.Workflow.Service
 
             var msg = $"流程【{def.FlowName}】已被管理员{op.NickName}挂起";
             NotifyUser(instance.ApplyUserId, msg);
+            return Task.CompletedTask;
         }
 
         /// <summary>
         /// 管理员恢复被挂起的流程。仅 Suspended 态可恢复，恢复后回到 Approval 流转。
         /// </summary>
-        public async Task AdminResume(long instanceId, long operatorId, string opinion)
+        public Task AdminResume(long instanceId, long operatorId, string opinion)
         {
             var instance = Context.Queryable<WfFlowInstance>().First(i => i.InstanceId == instanceId)
                 ?? throw new CustomException("流程实例不存在");
@@ -1722,6 +1724,7 @@ namespace ZR.Workflow.Service
 
             var msg = $"流程【{def.FlowName}】已被管理员{op.NickName}恢复";
             NotifyUser(instance.ApplyUserId, msg);
+            return Task.CompletedTask;
         }
 
         /// <summary>
@@ -1733,7 +1736,7 @@ namespace ZR.Workflow.Service
         /// <param name="targetUserId">改派目标用户 userId</param>
         /// <param name="operatorId">操作管理员 userId</param>
         /// <param name="opinion">改派说明（可选）</param>
-        public async Task AdminReassign(long instanceId, long nodeId, long targetUserId, long operatorId, string opinion)
+        public Task AdminReassign(long instanceId, long nodeId, long targetUserId, long operatorId, string opinion)
         {
             var instance = Context.Queryable<WfFlowInstance>().First(i => i.InstanceId == instanceId)
                 ?? throw new CustomException("流程实例不存在");
@@ -1768,6 +1771,7 @@ namespace ZR.Workflow.Service
             }, "AdminReassign");
 
             NotifyUser((long?)target.UserId, $"您有流程【{def.FlowName}】的待办已被管理员{op.NickName}改派给您");
+            return Task.CompletedTask;
         }
 
         /// <summary>
@@ -1778,7 +1782,7 @@ namespace ZR.Workflow.Service
         /// <param name="targetNodeId">跳转目标节点（必须存在于该流程且非结束节点）</param>
         /// <param name="operatorId">操作管理员 userId</param>
         /// <param name="opinion">跳转说明（可选）</param>
-        public async Task AdminJump(long instanceId, long targetNodeId, long operatorId, string opinion)
+        public Task AdminJump(long instanceId, long targetNodeId, long operatorId, string opinion)
         {
             var instance = Context.Queryable<WfFlowInstance>().First(i => i.InstanceId == instanceId)
                 ?? throw new CustomException("流程实例不存在");
@@ -1830,6 +1834,7 @@ namespace ZR.Workflow.Service
 
             var msg = $"流程【{def.FlowName}】已被管理员{op.NickName}跳转至节点【{target.NodeName}】";
             NotifyUser(instance.ApplyUserId, msg);
+            return Task.CompletedTask;
         }
 
         #endregion

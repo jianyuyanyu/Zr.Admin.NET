@@ -8,7 +8,7 @@ namespace ZR.Workflow.Model.Topology
     /// 每次流转不再重复反序列化同一份 ConditionJson，仅做运行时"表单取字段值 + 比较"。
     ///
     /// 静态配置错误（JSON 解析失败 / field 缺失 / op 缺失或无效 / value 缺失）在预解析时**记录**到
-    /// <see cref="ConditionError"/>（不立即抛错），由引擎运行时 <see cref="WfEngineService.EvalParsedCondition"/>
+    /// <see cref="ConditionError"/>（不立即抛错），由引擎运行时 <see cref="Service.WfEngineService.EvalParsedCondition"/>
     /// 在**事务内**抛出（保证事务回滚 + 消息经 RunInTx 包装），与既有收紧语义完全一致。
     /// </summary>
     public sealed class ResolvedOutLink

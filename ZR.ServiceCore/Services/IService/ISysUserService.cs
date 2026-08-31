@@ -50,6 +50,7 @@ namespace ZR.ServiceCore.Services
         /// </summary>
         /// <param name="userid"></param>
         /// <param name="password"></param>
+        /// <param name="notifyContent">重置后通知用户的内容，为空则不发送通知</param>
         /// <returns></returns>
         public int ResetPwd(long userid, string password, string notifyContent = null);
 
