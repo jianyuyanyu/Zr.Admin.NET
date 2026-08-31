@@ -38,5 +38,15 @@ namespace ZR.ServiceCore.Services
         /// 只返回建议不落库，采纳与否由用户在列配置页勾选后走既有保存接口。
         /// </summary>
         Task<SysAiGenColumnResult> SuggestGenColumnsAsync(long tableId);
+
+        /// <summary>
+        /// 解读登录日志聚合指标生成安全分析报告（Markdown，不落库）
+        /// </summary>
+        Task<SysAiLogReportResult> AnalyzeLoginSecurityAsync(LoginSecurityMetricsDto metrics);
+
+        /// <summary>
+        /// 解读操作日志聚合指标生成健康分析报告（Markdown，不落库）
+        /// </summary>
+        Task<SysAiLogReportResult> AnalyzeOperHealthAsync(OperHealthMetricsDto metrics);
     }
 }

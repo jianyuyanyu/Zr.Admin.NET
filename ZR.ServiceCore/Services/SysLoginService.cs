@@ -221,6 +221,150 @@ namespace ZR.ServiceCore.Services
             return list;
         }
 
+        /// <summary>
+        /// 聚合登录日志安全指标供 AI 解读。走租户库 + 数据范围过滤，与登录日志列表同一口径；
+        /// 指标由固定 SQL 聚合，AI 只解读结果，不接触原始日志也不生成任何 SQL。
+        /// </summary>
+        public LoginSecurityMetricsDto GetLoginSecurityMetrics(LogAiAnalysisInput input)
+        {
+            var (begin, end) = input.ResolveRange();
+            var metrics = new LoginSecurityMetricsDto
+            {
+                TimeRange = $"{begin:yyyy-MM-dd} ~ {end:yyyy-MM-dd}"
+            };
+
+            var db = ResolveTenantDb();
+
+            // 成功/失败总量（sys_logininfor.status：0成功 1失败）
+            foreach (var row in BuildRangeQuery(db, begin, end).GroupBy(it => it.Status)
+                .Select(it => new { Status = it.Status, Num = SqlFunc.AggregateCount(it.InfoId) })
+                .ToList())
+            {
+                if (row.Status == "0")
+                {
+                    metrics.SuccessCount = row.Num;
+                }
+                else if (row.Status == "1")
+                {
+                    metrics.FailCount = row.Num;
+                }
+            }
+            metrics.TotalCount = metrics.SuccessCount + metrics.FailCount;
+
+            // 每日成功/失败趋势
+            metrics.Daily = BuildRangeQuery(db, begin, end).GroupBy(it => it.LoginTime.ToString("yyyy-MM-dd"))
+                .Select(it => new
+                {
+                    Date = it.LoginTime.ToString("yyyy-MM-dd"),
+                    Success = SqlFunc.AggregateSum(SqlFunc.IIF(it.Status == "0", 1, 0)),
+                    Fail = SqlFunc.AggregateSum(SqlFunc.IIF(it.Status == "1", 1, 0))
+                })
+                .ToList()
+                .OrderBy(x => x.Date)
+                .Select(x => new LoginDailyStat { Date = x.Date, Success = x.Success, Fail = x.Fail })
+                .ToList();
+
+            // 凌晨 0-6 点活跃（异常时段信号）
+            metrics.NightCount = BuildRangeQuery(db, begin, end).Where(it => it.LoginTime.Hour < 6).Count();
+            metrics.NightFailCount = BuildRangeQuery(db, begin, end).Where(it => it.LoginTime.Hour < 6 && it.Status == "1").Count();
+
+            // 失败账号 Top：按账号+地点分组后在内存归并，才能拿到地点去重数（异地/共享账号信号）
+            var failRows = BuildRangeQuery(db, begin, end).Where(it => it.Status == "1")
+                .GroupBy(it => new { it.UserName, it.LoginLocation })
+                .Select(it => new
+                {
+                    it.UserName,
+                    it.LoginLocation,
+                    Num = SqlFunc.AggregateCount(it.InfoId),
+                    Last = SqlFunc.AggregateMax(it.LoginTime)
+                })
+                .ToList();
+            metrics.FailedAccounts = failRows
+                .GroupBy(x => x.UserName)
+                .Select(g => new LoginFailAccountStat
+                {
+                    UserName = g.Key,
+                    FailCount = g.Sum(x => x.Num),
+                    LocationCount = g.Select(x => x.LoginLocation).Where(x => !string.IsNullOrEmpty(x)).Distinct().Count(),
+                    Locations = string.Join("、", g.Select(x => x.LoginLocation).Where(x => !string.IsNullOrEmpty(x)).Distinct().Take(5)),
+                    LastFailTime = g.Max(x => x.Last)
+                })
+                .OrderByDescending(x => x.FailCount)
+                .Take(10)
+                .ToList();
+
+            // 失败 IP Top
+            metrics.FailedIps = BuildRangeQuery(db, begin, end).Where(it => it.Status == "1")
+                .GroupBy(it => new { it.Ipaddr, it.LoginLocation })
+                .Select(it => new
+                {
+                    it.Ipaddr,
+                    it.LoginLocation,
+                    Num = SqlFunc.AggregateCount(it.InfoId),
+                    Last = SqlFunc.AggregateMax(it.LoginTime)
+                })
+                .ToList()
+                .GroupBy(x => x.Ipaddr)
+                .Select(g => new LoginFailIpStat
+                {
+                    Ipaddr = g.Key,
+                    FailCount = g.Sum(x => x.Num),
+                    Location = g.Select(x => x.LoginLocation).FirstOrDefault(x => !string.IsNullOrEmpty(x)) ?? string.Empty,
+                    LastFailTime = g.Max(x => x.Last)
+                })
+                .OrderByDescending(x => x.FailCount)
+                .Take(10)
+                .ToList();
+
+            // 客户端环境分布 Top5
+            metrics.Browsers = BuildRangeQuery(db, begin, end).GroupBy(it => it.Browser)
+                .Select(it => new { Name = it.Browser, Num = SqlFunc.AggregateCount(it.InfoId) })
+                .ToList()
+                .OrderByDescending(x => x.Num).Take(5)
+                .Select(x => new NameCountStat { Name = x.Name, Count = x.Num })
+                .ToList();
+            metrics.Oses = BuildRangeQuery(db, begin, end).GroupBy(it => it.Os)
+                .Select(it => new { Name = it.Os, Num = SqlFunc.AggregateCount(it.InfoId) })
+                .ToList()
+                .OrderByDescending(x => x.Num).Take(5)
+                .Select(x => new NameCountStat { Name = x.Name, Count = x.Num })
+                .ToList();
+
+            // IP 面貌：区间去重 IP 与近 30 天未出现的"新 IP"
+            var rangeIps = BuildRangeQuery(db, begin, end)
+                .Where(it => it.Ipaddr != null && it.Ipaddr != "")
+                .Select(it => it.Ipaddr).Distinct().ToList();
+            metrics.DistinctIpCount = rangeIps.Count;
+            var priorIps = db.Queryable<SysLogininfor>().ApplyScope()
+                .Where(it => it.LoginTime >= begin.AddDays(-30) && it.LoginTime < begin && it.Ipaddr != null && it.Ipaddr != "")
+                .Select(it => it.Ipaddr).Distinct().ToList()
+                .ToHashSet(StringComparer.Ordinal);
+            metrics.NewIpCount = rangeIps.Count(x => !priorIps.Contains(x));
+
+            // 与登录日志列表同口径：无"真实 IP 查看"敏感权限时 IP 脱敏后再喂模型/展示，
+            // 避免无权限用户绕过列表页拿到明文 IP
+            if (!HttpContextExtension.HasSensitivePerm(App.HttpContext, SensitivePerms.ViewRealIP))
+            {
+                foreach (var ip in metrics.FailedIps)
+                {
+                    ip.Ipaddr = MaskUtil.MaskIp(ip.Ipaddr);
+                }
+                metrics.IpMasked = true;
+            }
+
+            return metrics;
+        }
+
+        /// <summary>
+        /// 构建区间内登录日志查询（租户库 + 数据范围过滤）。每次调用返回全新 queryable，
+        /// 避免 SqlSugar 同一实例在多次聚合之间复用时共享查询状态产生串扰。
+        /// </summary>
+        private ISugarQueryable<SysLogininfor> BuildRangeQuery(ISqlSugarClient db, DateTime begin, DateTime end)
+        {
+            return db.Queryable<SysLogininfor>().ApplyScope()
+                .Where(it => it.LoginTime >= begin && it.LoginTime <= end);
+        }
+
         public string GetAbnormalLoginNotice(SysUser user, string currentLoginIp)
         {
             if (user == null || user.UserId <= 0)

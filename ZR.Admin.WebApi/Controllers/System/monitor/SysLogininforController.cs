@@ -13,10 +13,12 @@ namespace ZR.Admin.WebApi.Controllers.monitor
     public class SysLogininforController : BaseController
     {
         private ISysLoginService sysLoginService;
+        private ISysAiService sysAiService;
 
-        public SysLogininforController(ISysLoginService sysLoginService)
+        public SysLogininforController(ISysLoginService sysLoginService, ISysAiService sysAiService)
         {
             this.sysLoginService = sysLoginService;
+            this.sysAiService = sysAiService;
         }
 
         /// <summary>
@@ -114,6 +116,25 @@ namespace ZR.Admin.WebApi.Controllers.monitor
             var categories = list.Select(x => x.Date.ToString("dd日")).ToList();
             var numList = list.Select(x => x.Num).ToList();
             return SUCCESS(new { categories, numList });
+        }
+
+        /// <summary>
+        /// AI 登录日志安全分析：服务端固定 SQL 聚合指标后交由大模型解读，返回 Markdown 报告（不落库）
+        /// </summary>
+        [HttpPost("aiSecurity")]
+        [ActionPermissionFilter(Permission = "monitor:logininfor:ai")]
+        [Log(Title = "AI 登录安全分析", BusinessType = BusinessType.OTHER, IsSaveRequestData = false)]
+        public async Task<IActionResult> AiSecurity([FromBody] LogAiAnalysisInput input)
+        {
+            try
+            {
+                var metrics = sysLoginService.GetLoginSecurityMetrics(input);
+                return SUCCESS(await sysAiService.AnalyzeLoginSecurityAsync(metrics));
+            }
+            catch (Exception ex)
+            {
+                return ToResponse(ResultCode.FAIL, ex.Message);
+            }
         }
     }
 }

@@ -25,6 +25,8 @@ namespace ZR.ServiceCore.Services
                 ("system:lang:list", "AI 翻译", "system:lang:ai"),
                 ("monitor:job:list", "AI 生成 Cron", "monitor:job:ai"),
                 ("tool:gen:list", "AI 推断列配置", "tool:gen:ai"),
+                ("monitor:logininfor:list", "AI 安全分析", "monitor:logininfor:ai"),
+                ("monitor:operlog:list", "AI 健康分析", "monitor:operlog:ai"),
             };
 
             var inserted = 0;

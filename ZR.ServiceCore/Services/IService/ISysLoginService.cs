@@ -61,5 +61,12 @@ namespace ZR.ServiceCore.Services
         /// </summary>
         /// <returns></returns>
         List<StatiLoginLogDto> GetStatiLoginlog();
+
+        /// <summary>
+        /// 聚合登录日志安全指标（供 AI 安全分析解读，不返回原始日志）
+        /// </summary>
+        /// <param name="input">时间范围参数</param>
+        /// <returns>聚合指标</returns>
+        LoginSecurityMetricsDto GetLoginSecurityMetrics(LogAiAnalysisInput input);
     }
 }

@@ -59,6 +59,12 @@ namespace ZR.ServiceCore.Services
             "customInput", "colorPicker"
         };
 
+        /// <summary>指标序列化选项：camelCase，让提示词里的字段说明与 JSON 字段名一致</summary>
+        private static readonly System.Text.Json.JsonSerializerOptions MetricJsonOptions = new()
+        {
+            PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase
+        };
+
         private readonly ICommonLangService _commonLangService;
         private readonly IDailyScheduleService _dailyScheduleService;
         private readonly IGenTableColumnService _genTableColumnService;
@@ -296,6 +302,47 @@ namespace ZR.ServiceCore.Services
                 System.Text.Json.JsonSerializer.Serialize(payload)).ConfigureAwait(false);
 
             return ParseGenColumnResult(reply, payload.tableName, dbColumns);
+        }
+
+        /// <summary>
+        /// 解读登录日志聚合指标，生成 Markdown 安全分析报告（不落库）。
+        /// 指标由服务端固定 SQL 聚合，模型只负责解读，不接触原始日志。
+        /// </summary>
+        public async Task<SysAiLogReportResult> AnalyzeLoginSecurityAsync(LoginSecurityMetricsDto metrics)
+        {
+            if (metrics == null)
+            {
+                throw new Exception("聚合指标不能为空");
+            }
+
+            var reply = await ChatSafeAsync(
+                GetPromptOrThrow("system/log-login-analysis.md", "登录日志 AI 安全分析"),
+                System.Text.Json.JsonSerializer.Serialize(metrics, MetricJsonOptions)).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(reply))
+            {
+                throw new Exception("AI 未返回分析报告，请稍后重试");
+            }
+            return new SysAiLogReportResult { Report = reply.Trim() };
+        }
+
+        /// <summary>
+        /// 解读操作日志聚合指标（错误已聚类），生成 Markdown 健康分析报告（不落库）。
+        /// </summary>
+        public async Task<SysAiLogReportResult> AnalyzeOperHealthAsync(OperHealthMetricsDto metrics)
+        {
+            if (metrics == null)
+            {
+                throw new Exception("聚合指标不能为空");
+            }
+
+            var reply = await ChatSafeAsync(
+                GetPromptOrThrow("system/log-oper-analysis.md", "操作日志 AI 健康分析"),
+                System.Text.Json.JsonSerializer.Serialize(metrics, MetricJsonOptions)).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(reply))
+            {
+                throw new Exception("AI 未返回分析报告，请稍后重试");
+            }
+            return new SysAiLogReportResult { Report = reply.Trim() };
         }
 
         /// <summary>

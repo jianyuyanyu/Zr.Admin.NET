@@ -33,5 +33,13 @@ namespace ZR.ServiceCore.Services
         /// <param name="operId">操作ID</param>
         /// <returns>操作日志对象</returns>
         public SysOperLog SelectOperLogById(long operId);
+
+        /// <summary>
+        /// 聚合操作日志健康指标（错误已聚类，供 AI 健康分析解读）
+        /// </summary>
+        /// <param name="input">时间范围参数</param>
+        /// <param name="operName">限定操作人，非空时只统计该用户的日志（非管理员口径）</param>
+        /// <returns>聚合指标</returns>
+        OperHealthMetricsDto GetOperHealthMetrics(LogAiAnalysisInput input, string operName = null);
     }
 }
