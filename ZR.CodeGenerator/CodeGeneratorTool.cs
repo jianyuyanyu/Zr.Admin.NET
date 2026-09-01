@@ -38,52 +38,24 @@ namespace ZR.CodeGenerator
                 dto.AppVuePath = genOptions.UniappPath;
             }
             dto.GenOptions = GenerateOption(dto.GenTable);
-            if (dto.GenTable.SubTable != null)
+            if (dto.GenTable.SubTables == null)
             {
-                dto.SubTableOptions = GenerateOption(dto.GenTable.SubTable);
+                dto.GenTable.SubTables = new List<GenTable>();
+            }
+            if (dto.GenTable.SubTable != null && !dto.GenTable.SubTables.Any(f => f.TableName == dto.GenTable.SubTable.TableName))
+            {
+                dto.GenTable.SubTables.Insert(0, dto.GenTable.SubTable);
+            }
+            if (dto.GenTable.SubTables.Count > 0)
+            {
+                dto.SubTableOptions = GenerateOption(dto.GenTable.SubTables[0]);
             }
             if (dto.GenTable.SubTableName.IsNotEmpty() && dto.GenTable.SubTable == null)
             {
                 throw new CustomException($"{dto.GenTable.SubTableName}子表不存在");
             }
 
-            ReplaceDto replaceDto = new()
-            {
-                ModelTypeName = dto.GenTable.ClassName,//表名对应C# 实体类名
-                PermissionPrefix = dto.GenTable?.Options?.PermissionPrefix,
-                Author = dto.GenTable.FunctionAuthor,
-                ShowBtnAdd = dto.GenTable.Options.CheckedBtn.Any(f => f == 1),
-                ShowBtnEdit = dto.GenTable.Options.CheckedBtn.Any(f => f == 2),
-                ShowBtnDelete = dto.GenTable.Options.CheckedBtn.Any(f => f == 3),
-                ShowBtnExport = dto.GenTable.Options.CheckedBtn.Any(f => f == 4),
-                ShowBtnView = dto.GenTable.Options.CheckedBtn.Any(f => f == 5),
-                ShowBtnTruncate = dto.GenTable.Options.CheckedBtn.Any(f => f == 6),
-                ShowBtnMultiDel = dto.GenTable.Options.CheckedBtn.Any(f => f == 7),
-                ShowBtnImport = dto.GenTable.Options.CheckedBtn.Any(f => f == 8),
-                ViewFileName = dto.GenTable.BusinessName.FirstUpperCase(),
-                OperBtnStyle = dto.GenTable.Options.OperBtnStyle,
-                UseSnowflakeId = dto.GenTable.Options.UseSnowflakeId,
-                EnableLog = dto.GenTable.Options.EnableLog,
-                EnableColumns = dto.GenTable.Options.EnableColumns
-            };
-            var columns = dto.GenTable.Columns;
-
-            replaceDto.PKName = columns.Find(f => f.IsPk || f.IsIncrement)?.CsharpField ?? "Id";
-            replaceDto.PKType = columns.Find(f => f.IsPk || f.IsIncrement)?.CsharpType ?? "int";
-
-            replaceDto.UploadFile = columns.Any(f => f.HtmlType.Equals(GenConstants.HTML_IMAGE_UPLOAD) || f.HtmlType.Equals(GenConstants.HTML_FILE_UPLOAD)) ? 1 : 0;
-            replaceDto.SelectMulti = columns.Any(f => f.HtmlType.Equals(GenConstants.HTML_SELECT_MULTI)) ? 1 : 0;
-            replaceDto.ShowEditor = columns.Any(f => f.HtmlType.Equals(GenConstants.HTML_EDITOR)) ? 1 : 0;
-            replaceDto.FistLowerPk = replaceDto.PKName.FirstLowerCase();
-            var softDeleteColumn = GetSoftDeleteColumn(columns);
-            if (softDeleteColumn != null)
-            {
-                replaceDto.EnableSoftDelete = true;
-                replaceDto.SoftDeleteField = softDeleteColumn.CsharpField;
-                replaceDto.SoftDeleteFieldType = softDeleteColumn.CsharpType;
-                replaceDto.SoftDeleteNormalValue = GetSoftDeleteFlagValue(softDeleteColumn, false);
-                replaceDto.SoftDeleteDeletedValue = GetSoftDeleteFlagValue(softDeleteColumn, true);
-            }
+            ReplaceDto replaceDto = BuildReplaceDto(dto.GenTable);
             InitJntTemplate(dto, replaceDto);
 
             GenerateModels(replaceDto, dto);
@@ -133,10 +105,58 @@ namespace ZR.CodeGenerator
             return _option;
         }
 
+        /// <summary>
+        /// 构建模板替换实体（主表/子表通用）
+        /// </summary>
+        /// <param name="genTable">生成表</param>
+        /// <returns></returns>
+        private static ReplaceDto BuildReplaceDto(GenTable genTable)
+        {
+            var options = genTable.Options ?? new CodeOptions();
+            ReplaceDto replaceDto = new()
+            {
+                ModelTypeName = genTable.ClassName,//表名对应C# 实体类名
+                PermissionPrefix = options.PermissionPrefix,
+                Author = genTable.FunctionAuthor,
+                ShowBtnAdd = options.CheckedBtn.Any(f => f == 1),
+                ShowBtnEdit = options.CheckedBtn.Any(f => f == 2),
+                ShowBtnDelete = options.CheckedBtn.Any(f => f == 3),
+                ShowBtnExport = options.CheckedBtn.Any(f => f == 4),
+                ShowBtnView = options.CheckedBtn.Any(f => f == 5),
+                ShowBtnTruncate = options.CheckedBtn.Any(f => f == 6),
+                ShowBtnMultiDel = options.CheckedBtn.Any(f => f == 7),
+                ShowBtnImport = options.CheckedBtn.Any(f => f == 8),
+                ViewFileName = genTable.BusinessName.FirstUpperCase(),
+                OperBtnStyle = options.OperBtnStyle,
+                UseSnowflakeId = options.UseSnowflakeId,
+                EnableLog = options.EnableLog,
+                EnableColumns = options.EnableColumns
+            };
+            var columns = genTable.Columns ?? new List<GenTableColumn>();
+
+            replaceDto.PKName = columns.Find(f => f.IsPk || f.IsIncrement)?.CsharpField ?? "Id";
+            replaceDto.PKType = columns.Find(f => f.IsPk || f.IsIncrement)?.CsharpType ?? "int";
+
+            replaceDto.UploadFile = columns.Any(f => f.HtmlType.Equals(GenConstants.HTML_IMAGE_UPLOAD) || f.HtmlType.Equals(GenConstants.HTML_FILE_UPLOAD)) ? 1 : 0;
+            replaceDto.SelectMulti = columns.Any(f => f.HtmlType.Equals(GenConstants.HTML_SELECT_MULTI)) ? 1 : 0;
+            replaceDto.ShowEditor = columns.Any(f => f.HtmlType.Equals(GenConstants.HTML_EDITOR)) ? 1 : 0;
+            replaceDto.FistLowerPk = replaceDto.PKName.FirstLowerCase();
+            var softDeleteColumn = GetSoftDeleteColumn(columns);
+            if (softDeleteColumn != null)
+            {
+                replaceDto.EnableSoftDelete = true;
+                replaceDto.SoftDeleteField = softDeleteColumn.CsharpField;
+                replaceDto.SoftDeleteFieldType = softDeleteColumn.CsharpType;
+                replaceDto.SoftDeleteNormalValue = GetSoftDeleteFlagValue(softDeleteColumn, false);
+                replaceDto.SoftDeleteDeletedValue = GetSoftDeleteFlagValue(softDeleteColumn, true);
+            }
+            return replaceDto;
+        }
+
         #region 读取模板
 
         /// <summary>
-        /// 生成实体类Model
+        /// 生成实体类Model（含子表实体/Dto连带生成，避免主表Nav引用悬空导致编译不过）
         /// </summary>
         /// <param name="generateDto"></param>
         /// <param name="replaceDto">替换实体</param>
@@ -151,6 +171,34 @@ namespace ZR.CodeGenerator
 
             generateDto.GenCodes.Add(new GenCode(1, "Model.cs", fullPath, tpl.Render()));
             generateDto.GenCodes.Add(new GenCode(2, "Dto.cs", fullPathDto, tplDto.Render()));
+
+            // 连带生成子表实体/Dto（子表实体不生成时，主表Nav属性引用会编译不过）
+            var subTables = generateDto.GenTable.SubTables ?? new List<GenTable>();
+            foreach (var subTable in subTables)
+            {
+                if (subTable == null || subTable.Columns == null || subTable.ClassName.IsEmpty()) continue;
+                // 防御：子表类名与主表相同（配置错误）时跳过，避免互相覆盖
+                if (subTable.ClassName.Equals(replaceDto.ModelTypeName, StringComparison.Ordinal)) continue;
+                var subReplaceDto = BuildReplaceDto(subTable);
+                var subOptions = GenerateOption(subTable);
+
+                var subTplModel = JnHelper.ReadTemplate(path, "TplModel.txt");
+                subTplModel.Set("genTable", subTable);
+                subTplModel.Set("replaceDto", subReplaceDto);
+                subTplModel.Set("options", subOptions);
+                subTplModel.Set("dicts", new List<GenTableColumn>());
+
+                var subTplDto = JnHelper.ReadTemplate(path, "TplDto.txt");
+                subTplDto.Set("genTable", subTable);
+                subTplDto.Set("replaceDto", subReplaceDto);
+                subTplDto.Set("options", subOptions);
+                subTplDto.Set("dicts", new List<GenTableColumn>());
+
+                var subModelPath = Path.Combine(subOptions.ModelsNamespace, subOptions.SubNamespace, subReplaceDto.ModelTypeName + ".cs");
+                var subDtoPath = Path.Combine(subOptions.ModelsNamespace, subOptions.SubNamespace, "Dto", subReplaceDto.ModelTypeName + "Dto.cs");
+                generateDto.GenCodes.Add(new GenCode(1, "Model.cs", subModelPath, subTplModel.Render()));
+                generateDto.GenCodes.Add(new GenCode(2, "Dto.cs", subDtoPath, subTplDto.Render()));
+            }
         }
 
         /// <summary>
@@ -599,9 +647,12 @@ namespace ZR.CodeGenerator
             var dictHtml = new string[] { GenConstants.HTML_CHECKBOX, GenConstants.HTML_RADIO, GenConstants.HTML_SELECT, GenConstants.HTML_SELECT_MULTI };
             var dicts = new List<GenTableColumn>();
             dicts.AddRange(dto.GenTable.Columns.FindAll(f => dictHtml.Contains(f.HtmlType)));
-            if (dto.GenTable.SubTable != null && dto.GenTable.SubTableName.IsNotEmpty())
+            if (dto.GenTable.SubTables != null)
             {
-                dicts.AddRange(dto.GenTable?.SubTable?.Columns?.FindAll(f => dictHtml.Contains(f.HtmlType)));
+                foreach (var subTable in dto.GenTable.SubTables)
+                {
+                    dicts.AddRange(subTable?.Columns?.FindAll(f => dictHtml.Contains(f.HtmlType)));
+                }
             }
             #endregion
 
@@ -626,10 +677,12 @@ namespace ZR.CodeGenerator
                 options.Data.Set("subTableOptions", dto.SubTableOptions);
                 options.Data.Set("genTable", dto.GenTable);
                 options.Data.Set("genSubTable", dto.GenTable?.SubTable);
+                options.Data.Set("genSubTables", dto.GenTable?.SubTables ?? new List<GenTable>());
+                options.Data.Set("multiSub", dto.GenTable?.SubTables?.Count > 1);
                 options.Data.Set("showCustomInput", showCustomInput);
                 options.Data.Set("tool", new CodeGeneratorTool());
                 options.Data.Set("dicts", dicts.DistinctBy(x => x.DictType));
-                options.Data.Set("sub", dto.GenTable.SubTable != null && dto.GenTable.SubTableName.IsNotEmpty());
+                options.Data.Set("sub", dto.GenTable?.SubTables?.Count > 0);
                 options.EnableCache = true;
                 //...其它数据
             });
@@ -637,7 +690,15 @@ namespace ZR.CodeGenerator
 
         #region 模板用
         /// <summary>
-        /// 模板用
+        /// 模板用：子表实体命名空间（多子表循环时每个子表可能在不同模块）
+        /// </summary>
+        public static string SubModelNamespace(GenTable subTable)
+        {
+            return $"{subTable.BaseNameSpace}Model.{subTable.ModuleName.FirstUpperCase()}";
+        }
+
+        /// <summary>
+        /// 模板用：检查输入Dto排除字段
         /// </summary>
         /// <param name="str"></param>
         /// <returns></returns>

@@ -1,6 +1,11 @@
 ﻿$if(genTable.TplCategory.Contains("subNav") && genTable.SubTable != null)
 using ${subTableOptions.ModelsNamespace}.${subTableOptions.SubNamespace};
 $end
+$if(genTable.TplCategory == "subNavMore" && genSubTables.Count > 0)
+$foreach(subTable in genSubTables)
+using ${tool.SubModelNamespace(subTable)};
+${end}
+$end
 
 namespace ${options.ModelsNamespace}.${options.SubNamespace}
 {
@@ -38,9 +43,12 @@ $if((genTable.TplCategory == "subNav" || genTable.TplCategory == "sub") && genTa
         [Navigate(NavigateType.OneToOne, nameof(${replaceDto.PKName}))] //自定义关系映射
         public ${genTable.SubTable.ClassName} ${genTable.SubTable.ClassName}Nav { get; set; }
 $end
-$if(genTable.TplCategory == "subNavMore" && genTable.SubTable != null)
-        [Navigate(NavigateType.OneToMany, nameof(${genTable.SubTable.ClassName}.${genTable.SubTableFkName}), nameof(${replaceDto.PKName}))] //自定义关系映射
-        public List<${genTable.SubTable.ClassName}> ${genTable.SubTable.ClassName}Nav { get; set; }
+$if(genTable.TplCategory == "subNavMore" && genSubTables.Count > 0)
+$foreach(subTable in genSubTables)
+        [Navigate(NavigateType.OneToMany, nameof(${subTable.ClassName}.${subTable.ParentFkName}), nameof(${replaceDto.PKName}))] //自定义关系映射
+        public List<${subTable.ClassName}> ${subTable.ClassName}Nav { get; set; }
+
+${end}
 $end
     }
 }

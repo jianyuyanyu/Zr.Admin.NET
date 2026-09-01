@@ -48,10 +48,35 @@ namespace ZR.ServiceCore.Services
             if (info != null)
             {
                 info.Columns = GenTableColumnService.GenTableColumns(tableId);
+                // 一对多：优先读取 Options.SubTables 配置
+                var subConfigs = info.Options?.SubTables;
+                if (subConfigs != null && subConfigs.Count > 0)
+                {
+                    info.SubTables = new List<GenTable>();
+                    foreach (var cfg in subConfigs)
+                    {
+                        if (cfg == null || cfg.TableName.IsEmpty()) continue;
+                        var subTable = Queryable().Where(f => f.TableName == cfg.TableName).First();
+                        if (subTable == null) continue;
+                        subTable.Columns = GenTableColumnService.GenTableColumns(subTable.TableId);
+                        subTable.ParentFkName = cfg.FkName;
+                        info.SubTables.Add(subTable);
+                    }
+                }
+                // 兼容旧版单子表配置
                 if (!info.SubTableName.IsEmpty())
                 {
                     info.SubTable = Queryable().Where(f => f.TableName == info.SubTableName).First();
-                    info.SubTable.Columns = GenTableColumnService.GenTableColumns(info.SubTable.TableId);
+                    if (info.SubTable != null)
+                    {
+                        info.SubTable.Columns = GenTableColumnService.GenTableColumns(info.SubTable.TableId);
+                        info.SubTable.ParentFkName = info.SubTableFkName;
+                    }
+                    // 未配置 Options.SubTables 时，将旧单子表并入列表，供新版模板统一渲染
+                    if ((info.SubTables == null || info.SubTables.Count == 0) && info.SubTable != null)
+                    {
+                        info.SubTables = new List<GenTable> { info.SubTable };
+                    }
                 }
             }
             return info;
@@ -64,6 +89,17 @@ namespace ZR.ServiceCore.Services
         public List<GenTable> GetGenTableAll()
         {
             return GetAll();
+        }
+
+        /// <summary>
+        /// 根据表名获取代码生成表配置
+        /// </summary>
+        /// <param name="tableName">表名</param>
+        /// <returns></returns>
+        public GenTable GetGenTableByName(string tableName)
+        {
+            if (tableName.IsEmpty()) return null;
+            return Queryable().Where(f => f.TableName == tableName).First();
         }
 
         /// <summary>

@@ -27,7 +27,9 @@ namespace ${options.ServicesNamespace}.${options.SubNamespace}
 
             var response = Queryable()
 $if(null != genTable.SubTableName && "" != genTable.SubTableName)
-                //.Includes(x => x.${genTable.SubTable.ClassName}Nav) //填充子对象
+$foreach(subTable in genSubTables)
+                //.Includes(x => x.${subTable.ClassName}Nav) //填充子对象
+${end}
 $end
 $if(genTable.Options.SortField != "" && genTable.Options.SortField != null)
                 //.OrderBy("${genTable.Options.SortField} ${genTable.Options.SortType}")
@@ -79,7 +81,9 @@ $end
         {
             var response = Queryable()
 $if(null != genTable.SubTableName && "" != genTable.SubTableName)
-                .Includes(x => x.${genTable.SubTable.ClassName}Nav) //填充子对象
+$foreach(subTable in genSubTables)
+                .Includes(x => x.${subTable.ClassName}Nav) //填充子对象
+${end}
 $end
                 .Where(x => x.${replaceDto.PKName} == ${replaceDto.PKName})
 $if(replaceDto.EnableSoftDelete)
@@ -101,7 +105,11 @@ $end
             model.${replaceDto.SoftDeleteField} = ${replaceDto.SoftDeleteNormalValue};
     $end
 $if(null != genTable.SubTableName && "" != genTable.SubTableName)
-            return Context.InsertNav(model).Include(s1 => s1.${genTable.SubTable.ClassName}Nav).ExecuteReturnEntity();
+            return Context.InsertNav(model)
+$foreach(subTable in genSubTables)
+                .Include(s1 => s1.${subTable.ClassName}Nav)
+${end}
+                .ExecuteReturnEntity();
 $else
 $if(replaceDto.useSnowflakeId)
             Insertable(model).ExecuteReturnSnowflakeId();
@@ -121,7 +129,11 @@ $if(replaceDto.ShowBtnEdit)
         public int Update${replaceDto.ModelTypeName}(${replaceDto.ModelTypeName} model)
         {
 $if(null != genTable.SubTableName && "" != genTable.SubTableName)
-            return Context.UpdateNav(model).Include(z1 => z1.${genTable.SubTable.ClassName}Nav).ExecuteCommand() ? 1 : 0;
+            return Context.UpdateNav(model)
+$foreach(subTable in genSubTables)
+                .Include(z1 => z1.${subTable.ClassName}Nav)
+${end}
+                .ExecuteCommand() ? 1 : 0;
 $else
             return Update(model, true$if(replaceDto.enableLog), "修改${genTable.FunctionName}"$end);
 $end

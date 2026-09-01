@@ -229,9 +229,16 @@ $end
 $* 一对一/一对多列表显示详情 *$
 $if(sub)
     <el-drawer v-model="drawer" size="50%" direction="rtl">
-      <el-table :data="$tool.FirstLowerCase(genTable.SubTable.ClassName)List" header-row-class-name="text-navy">
+$if(multiSub)
+      <el-tabs v-model="activeSubTab">
+$end
+$foreach(subTable in genSubTables)
+$if(multiSub)
+      <el-tab-pane label="${subTable.FunctionName}" name="${subTable.ClassName}">
+$end
+      <el-table :data="$tool.FirstLowerCase(subTable.ClassName)List" header-row-class-name="text-navy">
         <el-table-column label="序号" type="index" width="80" />
-$foreach(column in genSubTable.Columns)
+$foreach(column in subTable.Columns)
 $set(columnName = column.CsharpFieldFl)
 $if(column.IsList == true)
 $if(column.HtmlType == "checkbox" || column.HtmlType.Contains("select") || column.HtmlType == "radio")
@@ -246,6 +253,13 @@ $end
 $end
 $end
       </el-table>
+$if(multiSub)
+      </el-tab-pane>
+$end
+${end}
+$if(multiSub)
+      </el-tabs>
+$end
     </el-drawer>
 $end
 
@@ -381,24 +395,34 @@ $end
 $end
 $end
         </el-row>
-$* 子表信息 *$
+$* 子表信息（支持多个子表，多子表用tabs展示） *$
 $if(sub)
-        <el-divider content-position="center">${genTable.SubTable.FunctionName}信息</el-divider>
+$if(multiSub)
+        <el-tabs v-model="activeSubTab">
+$end
+$foreach(subTable in genSubTables)
+$if(multiSub)
+        <el-tab-pane label="${subTable.FunctionName}" name="${subTable.ClassName}">
+$else
+        <el-divider content-position="center">${subTable.FunctionName}信息</el-divider>
+$end
         <el-row :gutter="10" class="mb8">
           <el-col :span="1.5">
-            <el-button type="primary" icon="Plus" @click="handleAdd${genTable.SubTable.ClassName}">添加</el-button>
+            <el-button type="primary" icon="Plus" @click="handleAdd${subTable.ClassName}">添加</el-button>
           </el-col>
           <el-col :span="1.5">
-            <el-button type="danger" icon="Delete" @click="handleDelete${genTable.SubTable.ClassName}">删除</el-button>
+            <el-button type="danger" icon="Delete" @click="handleDelete${subTable.ClassName}">删除</el-button>
           </el-col>
+$if(multiSub == false)
           <el-col :span="1.5">
             <el-button type="info" icon="FullScreen" @click="fullScreen = !fullScreen">{{ fullScreen ? '退出全屏' : '全屏' }}</el-button>
           </el-col>
+$end
         </el-row>
-        <el-table :data="${tool.FirstLowerCase(genTable.SubTable.ClassName)}List" :row-class-name="row${genTable.SubTable.ClassName}Index" @selection-change="handle${genTable.SubTable.ClassName}SelectionChange" ref="${genTable.SubTable.ClassName}Ref">
+        <el-table :data="${tool.FirstLowerCase(subTable.ClassName)}List" :row-class-name="row${subTable.ClassName}Index" @selection-change="handle${subTable.ClassName}SelectionChange" ref="${subTable.ClassName}Ref">
           <el-table-column type="selection" width="40" align="center" />
           <el-table-column label="序号" align="center" prop="index" width="50"/>
-$foreach(column in genTable.SubTable.Columns)
+$foreach(column in subTable.Columns)
 $set(labelName = column.ColumnComment)
 $set(columnName = column.CsharpFieldFl)
 $set(value = "item.dictValue")
@@ -408,7 +432,7 @@ $set(number = ".number")
 $set(switchType = ":active-value='1' :inactive-value='0'")
 $end
 $if(column.IsList == true)
-$if(column.IsPk || column.CsharpField == genTable.SubTableFkName)
+$if(column.IsPk || column.CsharpField == subTable.ParentFkName)
 $elseif(column.HtmlType == "inputNumber" || column.HtmlType == "customInput")
           <el-table-column label="${labelName}" align="center" prop="${columnName}" width="140">
             <template #default="scope">
@@ -426,10 +450,11 @@ $elseif(column.HtmlType == "radio" || column.HtmlType == "selectRadio" || column
             <template #default="scope">
               <el-select v-model="scope.row.${columnName}" placeholder="请选择${labelName}"${column.DisabledStr}>
                 <el-option
-                  v-for="item in $if(column.DictType != "")options.${column.DictType}${else}options.${column.CsharpFieldFl}Options$end" 
-                  :key="item.dictValue" 
-                  :label="item.dictLabel" 
+                  v-for="item in $if(column.DictType != "")options.${column.DictType}${else}options.${column.CsharpFieldFl}Options$end"
+                  :key="item.dictValue"
+                  :label="item.dictLabel"
                   :value="${value}"></el-option>
+              </el-select>
             </template>
           </el-table-column>
 $elseif(column.HtmlType == "switch")
@@ -454,6 +479,13 @@ $end
 $end
 $end
         </el-table>
+$if(multiSub)
+        </el-tab-pane>
+$end
+${end}
+$if(multiSub)
+        </el-tabs>
+$end
 $end
       </el-form>
       <template #footer v-if="opertype != 3">
@@ -700,7 +732,9 @@ $end
 $end
   };
 $if(sub)
-  ${tool.FirstLowerCase(genTable.SubTable.ClassName)}List.value = []
+$foreach(subTable in genSubTables)
+  ${tool.FirstLowerCase(subTable.ClassName)}List.value = []
+${end}
 $end
   proxy.resetForm("formRef")
 }
@@ -728,7 +762,9 @@ $end
 $end
       }
 $if(sub)
-      ${tool.FirstLowerCase(genTable.SubTable.ClassName)}List.value = res.data.${tool.FirstLowerCase(genTable.SubTable.ClassName)}Nav
+$foreach(subTable in genSubTables)
+      ${tool.FirstLowerCase(subTable.ClassName)}List.value = res.data.${tool.FirstLowerCase(subTable.ClassName)}Nav
+${end}
 $end
     }
   })
@@ -766,7 +802,9 @@ $end
 $end
       }
 $if(sub)
-      ${tool.FirstLowerCase(genTable.SubTable.ClassName)}List.value = res.data.${tool.FirstLowerCase(genTable.SubTable.ClassName)}Nav
+$foreach(subTable in genSubTables)
+      ${tool.FirstLowerCase(subTable.ClassName)}List.value = res.data.${tool.FirstLowerCase(subTable.ClassName)}Nav
+${end}
 $end
     }
   })
@@ -785,7 +823,9 @@ $end
 $end
 
 $if(sub)
-      form.value.${tool.FirstLowerCase(genTable.SubTable.ClassName)}Nav = ${tool.FirstLowerCase(genTable.SubTable.ClassName)}List.value
+$foreach(subTable in genSubTables)
+      form.value.${tool.FirstLowerCase(subTable.ClassName)}Nav = ${tool.FirstLowerCase(subTable.ClassName)}List.value
+${end}
 $end
       if (form.value.${replaceDto.FistLowerPk} != undefined && opertype.value === 2) {
 $if(replaceDto.ShowBtnEdit)
@@ -883,56 +923,63 @@ function handleExport() {
 $end
 
 $if(sub)
-/*********************${genTable.SubTable.FunctionName}子表信息*************************/
-const ${tool.FirstLowerCase(genTable.SubTable.ClassName)}List = ref([])
-const checked${genTable.SubTable.ClassName} = ref([])
-const fullScreen = ref(false)
-const drawer = ref(false)
+$foreach(subTable in genSubTables)
+/*********************${subTable.FunctionName}子表信息*************************/
+const ${tool.FirstLowerCase(subTable.ClassName)}List = ref([])
+const checked${subTable.ClassName} = ref([])
 
-/** ${genTable.SubTable.FunctionName}序号 */
-function row${genTable.SubTable.ClassName}Index({ row, rowIndex }) {
+/** ${subTable.FunctionName}序号 */
+function row${subTable.ClassName}Index({ row, rowIndex }) {
   row.index = rowIndex + 1;
 }
 
-/** ${genTable.SubTable.FunctionName}添加按钮操作 */
-function handleAdd${genTable.SubTable.ClassName}() {
+/** ${subTable.FunctionName}添加按钮操作 */
+function handleAdd${subTable.ClassName}() {
   let obj = {};
   //下面的代码自己设置默认值
-$foreach(column in genTable.SubTable.Columns)
-$if(column.IsPK || column.CsharpField == genTable.SubTableFkName)
+$foreach(column in subTable.Columns)
+$if(column.IsPK || column.CsharpField == subTable.ParentFkName)
 $elseif(column.IsList == true && "" != column.CsharpField)
   //obj.${column.CsharpFieldFl} = null;
 $end
 $end
-  ${tool.FirstLowerCase(genTable.SubTable.ClassName)}List.value.push(obj);
+  ${tool.FirstLowerCase(subTable.ClassName)}List.value.push(obj);
 }
 
 /** 复选框选中数据 */
-function handle${genTable.SubTable.ClassName}SelectionChange(selection) {
-  checked${genTable.SubTable.ClassName}.value = selection.map(item => item.index)
+function handle${subTable.ClassName}SelectionChange(selection) {
+  checked${subTable.ClassName}.value = selection.map(item => item.index)
 }
 
-/** ${genTable.SubTable.FunctionName}删除按钮操作 */
-function handleDelete${genTable.SubTable.ClassName}() {
-  if(checked${genTable.SubTable.ClassName}.value.length == 0){
-    proxy.${modal}modal.msgError('请先选择要删除的${genTable.SubTable.FunctionName}数据')
+/** ${subTable.FunctionName}删除按钮操作 */
+function handleDelete${subTable.ClassName}() {
+  if(checked${subTable.ClassName}.value.length == 0){
+    proxy.${modal}modal.msgError('请先选择要删除的${subTable.FunctionName}数据')
   } else {
-    const ${genTable.SubTable.ClassName}s = ${tool.FirstLowerCase(genTable.SubTable.ClassName)}List.value;
-    const checked${genTable.SubTable.ClassName}s = checked${genTable.SubTable.ClassName}.value;
-    ${tool.FirstLowerCase(genTable.SubTable.ClassName)}List.value = ${genTable.SubTable.ClassName}s.filter(function(item) {
-      return checked${genTable.SubTable.ClassName}s.indexOf(item.index) == -1
+    const ${subTable.ClassName}s = ${tool.FirstLowerCase(subTable.ClassName)}List.value;
+    const checked${subTable.ClassName}s = checked${subTable.ClassName}.value;
+    ${tool.FirstLowerCase(subTable.ClassName)}List.value = ${subTable.ClassName}s.filter(function(item) {
+      return checked${subTable.ClassName}s.indexOf(item.index) == -1
     });
   }
 }
+${end}
+$if(multiSub)
+const activeSubTab = ref('${genSubTables[0].ClassName}')
+$end
+const fullScreen = ref(false)
+const drawer = ref(false)
 
-/** ${genTable.SubTable.FunctionName}详情 */
+/** 子表详情 */
 function rowClick(row) {
   const id = row.${replaceDto.FistLowerPk} || ids.value
   get${genTable.BusinessName}(id).then((res) => {
     const { code, data } = res
     if (code == 200) {
       drawer.value = true
-      ${tool.FirstLowerCase(genTable.SubTable.ClassName)}List.value = data.${tool.FirstLowerCase(genTable.SubTable.ClassName)}Nav
+$foreach(subTable in genSubTables)
+      ${tool.FirstLowerCase(subTable.ClassName)}List.value = data.${tool.FirstLowerCase(subTable.ClassName)}Nav
+${end}
     }
   })
 }

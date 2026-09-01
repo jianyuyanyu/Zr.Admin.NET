@@ -120,7 +120,7 @@ namespace ZR.Admin.WebApi.Controllers
         [ActionPermissionFilter(Permission = "tool:gen:query")]
         public IActionResult GetColumnList(long tableId)
         {
-            var tableInfo = GenTableService.GetGenTableInfo(tableId);
+            var tableInfo = EnsureAndGetGenTable(tableId);
             var tables = GenTableService.GetGenTableAll();
             return SUCCESS(new { info = tableInfo, tables });
         }
@@ -138,6 +138,104 @@ namespace ZR.Admin.WebApi.Controllers
 
             return SUCCESS(new { columns = tableColumns });
         }
+
+        /// <summary>
+        /// 确保子表已导入代码生成（未导入时按物理表结构自动导入），返回是否发生了导入
+        /// </summary>
+        /// <param name="genTable">主表信息</param>
+        private bool EnsureSubTablesImported(GenTable genTable)
+        {
+            if (genTable == null) return false;
+
+            var subNames = new List<(string Name, string FkName)>();
+            var configs = genTable.Options?.SubTables;
+            if (configs != null)
+            {
+                subNames.AddRange(configs
+                    .Where(c => !string.IsNullOrEmpty(c?.TableName))
+                    .Select(c => (c.TableName, c.FkName)));
+            }
+            if (!string.IsNullOrEmpty(genTable.SubTableName))
+            {
+                subNames.Add((genTable.SubTableName, genTable.SubTableFkName));
+            }
+
+            bool imported = false;
+            foreach (var (name, _) in subNames.Distinct())
+            {
+                // 主表自己不可能做子表
+                if (name.Equals(genTable.TableName, StringComparison.OrdinalIgnoreCase)) continue;
+                // 已导入则跳过
+                if (GenTableService.GetGenTableByName(name) != null) continue;
+                // 物理库中不存在该表时给出明确错误，避免静默丢失
+                var dbTable = _CodeGeneraterService.GetAllTables(genTable.DbName, name, new PagerInfo { PageNum = 1, PageSize = 10 })
+                    .FirstOrDefault(f => f.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+                if (dbTable == null)
+                {
+                    throw new CustomException($"子表 {name} 既未导入代码生成，数据库中也不存在，请检查配置");
+                }
+                ImportSingleTable(dbTable.Name, dbTable.Description, genTable.DbName);
+                imported = true;
+            }
+            return imported;
+        }
+
+        /// <summary>
+        /// 按物理表结构导入单张表到代码生成（与导入接口 ImportTableSave 相同逻辑）
+        /// </summary>
+        /// <param name="tableName">表名</param>
+        /// <param name="description">表描述</param>
+        /// <param name="dbName">数据库名</param>
+        private void ImportSingleTable(string tableName, string description, string dbName)
+        {
+            if (string.IsNullOrEmpty(dbName))
+            {
+                dbName = _CodeGeneraterService.GetAllDataBases()?.FirstOrDefault();
+            }
+            if (string.IsNullOrEmpty(dbName))
+            {
+                throw new CustomException($"无法确定表 {tableName} 所在数据库，请先在导入页面手动导入");
+            }
+
+            InitTableDto initTableDto = new()
+            {
+                DbName = dbName,
+                UserName = HttpContext.GetName(),
+                TableName = tableName,
+                Desc = description,
+                CodeGen = OptionsSetting.CodeGen,
+                FrontTpl = 2
+            };
+
+            GenTable genTable = CodeGeneratorTool.InitTable(initTableDto);
+            genTable.TableId = GenTableService.ImportGenTable(genTable);
+            if (genTable.TableId > 0)
+            {
+                List<OracleSeq> seqs = new();
+                if (OptionsSetting.CodeGenDbConfig.DbType == 3)
+                {
+                    seqs = _CodeGeneraterService.GetAllOracleSeqs();
+                }
+                List<DbColumnInfo> dbColumnInfos = _CodeGeneraterService.GetColumnInfo(dbName, tableName);
+                List<GenTableColumn> genTableColumns = CodeGeneratorTool.InitGenTableColumn(genTable, dbColumnInfos, seqs, OptionsSetting.CodeGen);
+                GenTableColumnService.DeleteGenTableColumnByTableName(tableName);
+                GenTableColumnService.InsertGenTableColumn(genTableColumns);
+            }
+        }
+
+        /// <summary>
+        /// 获取主表信息，并自动导入配置了但尚未导入的子表（编辑/预览/生成共用）
+        /// </summary>
+        /// <param name="tableId">主表id</param>
+        private GenTable EnsureAndGetGenTable(long tableId)
+        {
+            var info = GenTableService.GetGenTableInfo(tableId);
+            if (info == null) return info;
+            bool changed = EnsureSubTablesImported(info);
+            // 发生了自动导入时重新加载，保证子表及列信息完整
+            return changed ? GenTableService.GetGenTableInfo(tableId) : info;
+        }
+
         /// <summary>
         /// 删除代码生成
         /// </summary>
@@ -255,7 +353,7 @@ namespace ZR.Admin.WebApi.Controllers
                 throw new CustomException(ResultCode.CUSTOM_ERROR, "请求参数为空");
             }
             dto.TableId = tableId;
-            var genTableInfo = GenTableService.GetGenTableInfo(dto.TableId);
+            var genTableInfo = EnsureAndGetGenTable(dto.TableId);
 
             dto.DbType = OptionsSetting.CodeGenDbConfig.DbType;
             dto.GenTable = genTableInfo;
@@ -282,7 +380,7 @@ namespace ZR.Admin.WebApi.Controllers
             }
 
             dto.DbType = OptionsSetting.CodeGenDbConfig.DbType;
-            dto.GenTable = GenTableService.GetGenTableInfo(dto.TableId);
+            dto.GenTable = EnsureAndGetGenTable(dto.TableId);
             //生成压缩包
             string zipReturnFileName = $"ZrAdmin.NET-{dto.GenTable.TableName}-{DateTime.Now:MMddHHmmss}.zip";
 

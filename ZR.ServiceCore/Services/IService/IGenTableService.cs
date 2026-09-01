@@ -15,6 +15,7 @@ namespace ZR.ServiceCore.Services
         GenTable GetGenTableInfo(long tableId);
         bool SynchDb(long tableId, GenTable genTable, List<GenTableColumn> genTableColumns);
         List<GenTable> GetGenTableAll();
+        GenTable GetGenTableByName(string tableName);
         int UpdateGenTable(GenTable genTable);
     }
 

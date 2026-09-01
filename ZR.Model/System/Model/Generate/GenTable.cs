@@ -93,11 +93,38 @@
         public List<GenTableColumn> Columns { get; set; }
 
         /// <summary>
-        /// 字表信息
+        /// 字表信息（一对一时使用，兼容旧版）
         /// </summary>
         [SugarColumn(IsIgnore = true)]
         public GenTable SubTable { get; set; }
+
+        /// <summary>
+        /// 多个子表信息（一对多：主表关联多个子表）
+        /// </summary>
+        [SugarColumn(IsIgnore = true)]
+        public List<GenTable> SubTables { get; set; }
+
+        /// <summary>
+        /// 本表作为子表时关联主表的外键字段名（生成模板用）
+        /// </summary>
+        [SugarColumn(IsIgnore = true)]
+        public string ParentFkName { get; set; }
         #endregion
+    }
+
+    /// <summary>
+    /// 主子表关联配置（存于 gen_table.options JSON，一对多支持）
+    /// </summary>
+    public class SubTableConfig
+    {
+        /// <summary>
+        /// 子表表名
+        /// </summary>
+        public string TableName { get; set; }
+        /// <summary>
+        /// 子表关联主表的外键字段名
+        /// </summary>
+        public string FkName { get; set; }
     }
 
     public class CodeOptions
@@ -145,5 +172,9 @@
         /// 启用显隐列
         /// </summary>
         public bool EnableColumns { get; set; } = true;
+        /// <summary>
+        /// 多个子表配置（一对多），优先于 SubTableName/SubTableFkName
+        /// </summary>
+        public List<SubTableConfig> SubTables { get; set; }
     }
 }
