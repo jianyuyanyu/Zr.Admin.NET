@@ -103,10 +103,10 @@ namespace ZR.Admin.WebApi.Controllers
         /// <returns></returns>
         [HttpGet("list")]
         [ActionPermissionFilter(Permission = "tool:gen:list")]
-        public IActionResult GetGenTable(string? tableName, PagerInfo pagerInfo)
+        public IActionResult GetGenTable(string? tableName, string? tableComment, string? tplCategory, string? dbName, PagerInfo pagerInfo)
         {
             //查询原表数据，部分字段映射到代码生成表字段
-            var rows = GenTableService.GetGenTables(new GenTable() { TableName = tableName }, pagerInfo);
+            var rows = GenTableService.GetGenTables(new GenTable() { TableName = tableName, TableComment = tableComment, TplCategory = tplCategory, DbName = dbName }, pagerInfo);
 
             return SUCCESS(rows, "MM月dd日 HH:mm");
         }

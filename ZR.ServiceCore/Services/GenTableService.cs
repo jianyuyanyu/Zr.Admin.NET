@@ -112,6 +112,9 @@ namespace ZR.ServiceCore.Services
         {
             var predicate = Expressionable.Create<GenTable>();
             predicate = predicate.AndIF(genTable.TableName.IfNotEmpty(), it => it.TableName.Contains(genTable.TableName));
+            predicate = predicate.AndIF(genTable.TableComment.IfNotEmpty(), it => it.TableComment.Contains(genTable.TableComment));
+            predicate = predicate.AndIF(genTable.TplCategory.IfNotEmpty(), it => it.TplCategory == genTable.TplCategory);
+            predicate = predicate.AndIF(genTable.DbName.IfNotEmpty(), it => it.DbName == genTable.DbName);
 
             return GetPages(predicate.ToExpression(), pagerInfo, x => x.TableId, OrderByType.Desc);
         }
