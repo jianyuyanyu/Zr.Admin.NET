@@ -140,5 +140,12 @@ namespace ZR.Workflow.Service.IService
         /// <param name="instanceId">流程实例Id</param>
         /// <param name="operatorId">操作人 userId（须为实例申请人 ApplyUserId）</param>
         void Urge(long instanceId, long operatorId);
+
+        /// <summary>
+        /// 流程模拟试运行：按给定表单推演审批路线（纯推演不落库），用于发布/发起前验证流程配置。
+        /// 走向与引擎运行时一致（条件网关选路 / 并行分叉汇聚 / 空审批人兜底），
+        /// 发现的配置问题（审批人为空、条件求值失败、无默认分支等）汇总在 Warnings 返回，不抛异常中断。
+        /// </summary>
+        WfSimulationResultDto Simulate(WfSimulateInputDto input);
     }
 }

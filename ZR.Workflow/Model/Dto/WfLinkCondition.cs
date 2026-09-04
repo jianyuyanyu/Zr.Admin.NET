@@ -16,7 +16,7 @@ namespace ZR.Workflow.Model.Dto
     ///
     /// 判断规则：<c>Conditions</c> 非空视为组合条件；否则按叶子条件（单比较）求值。
     /// 字段为空字符串（<c>""</c>）表示「无条件/默认分支」，由调用方分流到默认分支路径，不进入条件求值。
-    /// 引擎评估（<see cref="Service.WfEngineService.EvalLinkCondition"/>）区分两种失败语义：条件不满足返回 false；
+    /// 引擎评估（<see cref="Service.Engine.WfFormValueHelper.EvalLinkCondition"/>）区分两种失败语义：条件不满足返回 false；
     /// 配置错误（JSON 解析失败 / field / op / value 缺失或 op 无效 / 字段不在表单中）抛出异常并触发事务回滚，
     /// 防止"全部条件因配置错误而不满足 → 流程被误判为正常结束"。
     /// </summary>

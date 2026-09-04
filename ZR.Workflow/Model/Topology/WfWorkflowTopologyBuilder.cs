@@ -142,8 +142,8 @@ namespace ZR.Workflow.Model.Topology
         /// <summary>
         /// 预解析单条连线为 <see cref="ResolvedOutLink"/>。
         /// 带条件（ConditionJson 非空）时做静态配置解析与校验；**配置错误仅记录不抛错**
-        /// （由引擎运行时 <see cref="Service.WfEngineService.EvalParsedCondition"/> 在事务内抛出，保证回滚 + 消息包装）。
-        /// 对应既有 <see cref="Service.WfEngineService.EvalLinkCondition"/> 的"配置错误"语义，仅把 JSON 解析移出热路径。
+        /// （由引擎运行时 <see cref="Service.Engine.WfFormValueHelper.EvalParsedCondition"/> 在事务内抛出，保证回滚 + 消息包装）。
+        /// 对应既有 <see cref="Service.Engine.WfFormValueHelper.EvalLinkCondition"/> 的"配置错误"语义，仅把 JSON 解析移出热路径。
         /// </summary>
         private static ResolvedOutLink ResolveOutLink(WfNodeLink link)
         {

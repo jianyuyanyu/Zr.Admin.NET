@@ -43,7 +43,7 @@ namespace ZR.Workflow.Model
         /// <summary>
         /// 分支条件（JSON）。为空/null 表示无条件（默认分支）。
         /// 结构对应 <see cref="WfLinkCondition"/>：{ "field", "op", "value" }，op 取值同 <see cref="WfConditionOp"/>。
-        /// 引擎（<see cref="Service.WfEngineService.EvalLinkCondition"/>）按单条件解析；
+        /// 引擎（<see cref="Service.Engine.WfFormValueHelper.EvalLinkCondition"/>）按单条件解析；
         /// 缺任一字段或解析失败视为条件不满足（保守跳过该连线）。
         /// </summary>
         [SugarColumn(ColumnDataType = StaticConfig.CodeFirst_BigString, IsNullable = true)]

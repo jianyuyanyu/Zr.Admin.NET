@@ -1,5 +1,5 @@
 ﻿using ZR.ServiceCore.Services;
-using ZR.Workflow.Helper;
+using ZR.Workflow.Service.Engine;
 
 namespace ZR.Workflow.Service
 {
@@ -23,15 +23,17 @@ namespace ZR.Workflow.Service
     /// 标识约定：公共入口的"人"一律用 <c>userId</c>（见 <see cref="IWfEngineService"/>）。鉴权比对走
     /// <c>WfFlowTask.AssigneeId</c> / <c>WfFlowInstance.ApplyUserId</c>，不再比对可变的 userName；
     /// 展示用 userName / nickName 由 <see cref="LoadUser"/> 按 Id 查一次后快照落库。
+    /// 文件拆分（partial，位于 Service/Engine/）：Simulate / Webhook / Admin / Approvers。表单值见 <see cref="WfFormValueHelper"/>。
     /// </summary>
     [AppService(ServiceType = typeof(IWfEngineService))]
-    public class WfEngineService : BaseService<WfFlowInstance>, IWfEngineService
+    public partial class WfEngineService : BaseService<WfFlowInstance>, IWfEngineService
     {
         private NLog.Logger logger = NLog.LogManager.GetCurrentClassLogger();
 
         private readonly ISysUserMsgService _msgService;
         private readonly IWfWebhookService _webhookService;
         private readonly IWfAiService _aiService;
+        private readonly ISmsSender _smsSender;
 
         /// <summary>
         /// 审批人解析策略注册表：WfApproverType → IApproverResolver。
@@ -39,11 +41,12 @@ namespace ZR.Workflow.Service
         /// </summary>
         private readonly Dictionary<WfApproverType, IApproverResolver> _approverResolvers;
 
-        public WfEngineService(ISysUserMsgService msgService, IWfWebhookService webhookService, IWfAiService aiService)
+        public WfEngineService(ISysUserMsgService msgService, IWfWebhookService webhookService, IWfAiService aiService, ISmsSender smsSender)
         {
             _msgService = msgService;
             _webhookService = webhookService;
             _aiService = aiService;
+            _smsSender = smsSender;
 
             _approverResolvers = new Dictionary<WfApproverType, IApproverResolver>
             {
@@ -868,6 +871,7 @@ namespace ZR.Workflow.Service
 
         #endregion
 
+
         #region 私有辅助
 
         /// <summary>
@@ -940,13 +944,6 @@ namespace ZR.Workflow.Service
         }
 
         /// <summary>
-        /// 判断节点是否属于"流程节点"（审计/抄送），用于首节点查找与 <see cref="GetNextAuditNode"/>。
-        /// 静态方法便于在 LINQ 表达式树外复用。
-        /// </summary>
-        private static bool IsAuditableNode(int nodeType) =>
-            nodeType == (int)WfNodeType.Audit || nodeType == (int)WfNodeType.Cc;
-
-        /// <summary>
         /// 加载某 FlowId 的完整静态拓扑（节点 + 连线构建的 O(1) 索引 + 出边条件预解析）。
         /// 每次操作现构建一次，不做缓存；构建时对带条件的出边做静态配置校验（发起前暴露配置错误）。
         /// 替代旧的三件套 <c>allNodes + linksBySource + linksByTarget</c>。
@@ -966,7 +963,7 @@ namespace ZR.Workflow.Service
             // 首节点须包含条件网关（NodeType=4）与并行分叉网关（NodeType=7）：网关可作为流程的第一个节点（发起后立即分流/分叉）。
             // 若这里沿用 IsAuditableNode（只认 Audit/Cc），会直接跳过网关落到 NodeOrder 上的第一个审批节点，
             // 导致分支条件从未被评估、始终走"第一条分支"。ArriveNode 内部会对 Condition/ParallelFork 做透传处理。
-            var firstNode = topo.OrderedNodes.FirstOrDefault(n => IsAuditableNode(n.NodeType) || n.NodeType == (int)WfNodeType.Condition || n.NodeType == (int)WfNodeType.ParallelFork);
+            var firstNode = topo.OrderedNodes.FirstOrDefault(n => WfFormValueHelper.IsAuditableNode(n.NodeType) || n.NodeType == (int)WfNodeType.Condition || n.NodeType == (int)WfNodeType.ParallelFork);
             return (def, topo, firstNode);
         }
 
@@ -1037,21 +1034,12 @@ namespace ZR.Workflow.Service
         }
 
         /// <summary>
-        /// 将 FormContent(JSON) 解析为 字段-&gt;值 字典（值均为字符串）。解析失败返回空字典。
+        /// 将 FormContent(JSON) 解析为 字段-&gt;值 字典（值均为字符串）。整体格式错误返回空字典。
+        /// 逐字段容错：数组/对象值（如明细表 table 的行数组）序列化为 JSON 字符串存储，
+        /// 单字段类型不符不再导致整个表单解析失败（旧逻辑 Dictionary&lt;string,string&gt; 遇数组整体炸成空 dict，条件字段全丢）。
         /// </summary>
         private Dictionary<string, string> ParseFormValues(WfFlowInstance instance)
-        {
-            var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            if (string.IsNullOrWhiteSpace(instance.FormContent)) return dict;
-            try
-            {
-                var kv = JsonConvert.DeserializeObject<Dictionary<string, string>>(instance.FormContent);
-                if (kv != null)
-                    foreach (var k in kv) dict[k.Key] = k.Value;
-            }
-            catch { /* JSON 解析失败（格式错误或类型不匹配），视为无条件 */ }
-            return dict;
-        }
+            => Engine.WfFormValueHelper.ParseObject(instance.FormContent);
 
         /// <summary>
         /// 审批人编辑字段回写：按当前节点 <see cref="WfFlowNode.FieldPermission"/> 校验并持久化更新实例表单。
@@ -1120,165 +1108,6 @@ namespace ZR.Workflow.Service
 
         #endregion
 
-        #region 节点事件钩子（Webhook）
-
-        /// <summary>
-        /// 节点进入/离开事件钩子：Outbox 事务发件箱。
-        /// 按节点关联的 Webhook 配置（EnterWebhookId / LeaveWebhookId）查询启用的端点，
-        /// 在本方法被调用的"业务事务体内"插入一条 Pending 投递记录（含 EventId 幂等键、Payload 快照），
-        /// 与流程推进原子落库；投递由独立定时任务 RetryWebhookDeliveries 负责。失败不阻断流转。
-        /// </summary>
-        /// <param name="instance">流程实例（提供 InstanceId/Title/FormContent）</param>
-        /// <param name="node">触发节点（提供 NodeId/NodeName/WebhookId 引用）</param>
-        /// <param name="eventType">enter / leave（映射为 node.enter / node.leave）</param>
-        /// <param name="formValues">表单字段值（快照进 payload，便于外部系统取值）</param>
-        private void QueueNodeHook(WfFlowInstance instance, WfFlowNode node, string eventType, Dictionary<string, string> formValues)
-        {
-            var webhookId = eventType == "enter" ? node.EnterWebhookId : node.LeaveWebhookId;
-            if (webhookId == null || webhookId <= 0) return;
-
-            var cfg = _webhookService.GetFirst(it => it.WebhookId == webhookId && it.Enabled == 1);
-            if (cfg == null) return; // 配置不存在或已停用，不投递
-
-            var eventTypeNorm = eventType == "enter" ? "node.enter" : "node.leave";
-            var eventId = $"evt_{DateTime.Now:yyyyMMddHHmmssfff}_{Guid.NewGuid():N}";
-            var payload = new
-            {
-                eventId,
-                eventType = eventTypeNorm,
-                webhookId = cfg.WebhookId,
-                instanceId = instance.InstanceId,
-                flowId = instance.FlowId,
-                flowName = instance.FlowName,
-                title = instance.Title,
-                businessKey = instance.BusinessKey,
-                nodeId = node.NodeId,
-                nodeName = node.NodeName,
-                nodeType = node.NodeType,
-                formContent = instance.FormContent,
-                formValues,
-                time = DateTime.Now
-            };
-
-            var delivery = new WfWebhookDelivery
-            {
-                EventId = eventId,
-                WebhookId = cfg.WebhookId,
-                HookName = cfg.Name,
-                HookUrl = cfg.Url,
-                InstanceId = instance.InstanceId,
-                NodeId = node.NodeId,
-                NodeName = node.NodeName,
-                EventType = eventTypeNorm,
-                Payload = JsonConvert.SerializeObject(payload),
-                Status = (int)WfWebhookDeliveryStatus.Pending,
-                Processing = 0,
-                RetryCount = 0,
-                MaxRetry = 5,
-                Create_time = DateTime.Now
-            };
-            Context.Insertable(delivery).ExecuteCommand();
-            logger.Info($"[节点钩子:{eventTypeNorm}] 实例{instance.InstanceId} 节点{node.NodeName}({node.NodeId}) 已登记 Outbox 投递 EventId={eventId} Webhook={cfg.Name}");
-        }
-
-        /// <summary>
-        /// 投递 Outbox 中待发 / 到期可重试的 Webhook 记录（由 Job_WfWebhookRetry 定时调用）。
-        /// 多实例安全：用单条原子 UPDATE 抢占（WHERE Status=Pending AND LockUntil 过期），抢到才投递，
-        /// 避免多个 Worker 重复投递同一条；Worker 崩溃后 LockUntil 过期可被其它实例重新抢占。
-        /// 全程 try/catch，绝不向调用方抛异常，不阻断主流程。
-        /// </summary>
-        public void RetryWebhookDeliveries()
-        {
-            var now = DateTime.Now;
-            var due = Context.Queryable<WfWebhookDelivery>()
-                .Where(it => (it.Status == (int)WfWebhookDeliveryStatus.Pending)
-                    && (it.NextRetryTime == null || it.NextRetryTime <= now))
-                .OrderBy(it => it.Create_time)
-                .Take(200)
-                .ToList();
-
-            foreach (var d in due)
-            {
-                long id = d.DeliveryId;
-                // ① 原子抢占：CAS 把 Pending 改为 Processing，并置 LockUntil 防重复
-                var claimed = Context.Updateable<WfWebhookDelivery>()
-                    .SetColumns(it => new WfWebhookDelivery
-                    {
-                        Status = (int)WfWebhookDeliveryStatus.Processing,
-                        Processing = 1,
-                        LockUntil = DateTime.Now.AddSeconds(60)
-                    })
-                    .Where(it => it.DeliveryId == id
-                        && it.Status == (int)WfWebhookDeliveryStatus.Pending
-                        && (it.LockUntil == null || it.LockUntil < DateTime.Now))
-                    .ExecuteCommand();
-                if (claimed <= 0) continue; // 被其它 Worker 抢占 / 已锁定中，跳过
-
-                try
-                {
-                    // 投递到 Webhook 端点（受保护虚拟方法，便于测试注入成功/失败/计数）
-                    SendWebhook(d.HookUrl, d.Payload ?? "{}");
-                    // 抢占到 → 投递成功：置 Sent
-                    Context.Updateable<WfWebhookDelivery>()
-                        .SetColumns(it => new WfWebhookDelivery
-                        {
-                            Status = (int)WfWebhookDeliveryStatus.Sent,
-                            Processing = 0,
-                            LockUntil = null,
-                            LastAttemptTime = DateTime.Now,
-                            LastHttpStatusCode = 200,
-                            LastError = null,
-                            SentTime = DateTime.Now
-                        })
-                        .Where(it => it.DeliveryId == id)
-                        .ExecuteCommand();
-                    logger.Info($"[Webhook投递] EventId={d.EventId} Webhook={d.HookName} 投递成功");
-                }
-                catch (Exception ex)
-                {
-                    // 失败：回 Pending，RetryCount++，指数退避算 NextRetryTime，超限 → Dead
-                    var newCount = d.RetryCount + 1;
-                    int status;
-                    DateTime? next = null;
-                    if (newCount >= d.MaxRetry)
-                    {
-                        status = (int)WfWebhookDeliveryStatus.Dead;
-                    }
-                    else
-                    {
-                        status = (int)WfWebhookDeliveryStatus.Pending;
-                        // 指数退避：2^RetryCount 分钟（1→2m,2→4m,3→8m,4→16m）
-                        next = DateTime.Now.AddMinutes(Math.Pow(2, newCount));
-                    }
-                    Context.Updateable<WfWebhookDelivery>()
-                        .SetColumns(it => new WfWebhookDelivery
-                        {
-                            Status = status,
-                            Processing = 0,
-                            LockUntil = null,
-                            RetryCount = newCount,
-                            LastAttemptTime = DateTime.Now,
-                            LastHttpStatusCode = null,
-                            LastError = ex.Message,
-                            NextRetryTime = next
-                        })
-                        .Where(it => it.DeliveryId == id)
-                        .ExecuteCommand();
-                    logger.Error($"[Webhook投递] EventId={d.EventId} Webhook={d.HookName} 第{newCount}次失败：{ex.Message} → {(status == (int)WfWebhookDeliveryStatus.Dead ? "Dead" : "Pending")}");
-                }
-            }
-        }
-
-        /// <summary>
-        /// 向 Webhook 端点投递 payload（POST JSON）。抽出为受保护虚拟方法，便于单元测试通过子类重写注入成功/失败/计数。
-        /// 默认实现走框架 HttpHelper；投递异常直接向上抛，由 RetryWebhookDeliveries 统一处理为退避/死信。
-        /// </summary>
-        protected virtual void SendWebhook(string url, string body)
-        {
-            HttpHelper.HttpPostAsync(url, body, "application/json").GetAwaiter().GetResult();
-        }
-
-        #endregion
 
         #region 内部流转引擎
 
@@ -1349,7 +1178,7 @@ namespace ZR.Workflow.Service
                         // 无满足分支也无默认出边：把"不满足出边"的下游链作为被跳过分支激活（建 Skipped 并推进到汇聚点），避免流程误判完成
                         var outLinks = topo.GetOutLinks(node.NodeId);
                         var fallbacks = outLinks.Count > 0
-                            ? outLinks.Where(l => l.HasCondition && !EvalParsedCondition(l, formValues))
+                            ? outLinks.Where(l => l.HasCondition && !WfFormValueHelper.EvalParsedCondition(l, formValues))
                                   .Select(l => topo.GetNode(l.TargetNodeId)).Where(n => n != null).ToList()
                             : new List<WfFlowNode>();
                         if (fallbacks.Count > 0) { foreach (var fb in fallbacks) SkipBranchChain(instance, fb, topo, formValues, new HashSet<long>(), depth); }
@@ -1621,224 +1450,6 @@ namespace ZR.Workflow.Service
             SyncActiveNodeId(instance);
         }
 
-        #region 管理员运维操作（终止 / 挂起 / 恢复 / 改派 / 跳转）
-
-        /// <summary>
-        /// 管理员强制终止 / 作废流程（不可逆）。把所有未完成任务置为 Skipped，实例置 Terminated，
-        /// 记一条终止记录并通知申请人/相关人。仅由 Controller 的权限过滤器保证只有管理员可调用。
-        /// </summary>
-        /// <param name="instanceId">流程实例Id</param>
-        /// <param name="operatorId">操作管理员 userId</param>
-        /// <param name="opinion">终止原因（可选）</param>
-        public Task AdminTerminate(long instanceId, long operatorId, string opinion)
-        {
-            var instance = Context.Queryable<WfFlowInstance>().First(i => i.InstanceId == instanceId)
-                ?? throw new CustomException("流程实例不存在");
-            if (instance.Status == (int)WfInstanceStatus.Terminated)
-                throw new CustomException("流程已终止，不可重复操作");
-            if (instance.Status == (int)WfInstanceStatus.Approved)
-                throw new CustomException("流程已通过，不可终止");
-            if (instance.Status == (int)WfInstanceStatus.Withdrawn)
-                throw new CustomException("流程已撤回，不可终止");
-
-            var op = LoadUser(operatorId);
-            var def = LoadActivatableDefinition(instance.FlowId);
-            var openTaskIds = Context.Queryable<WfFlowTask>()
-                .Where(t => t.InstanceId == instanceId && t.Status != (int)WfTaskStatus.Done && t.Status != (int)WfTaskStatus.Skipped)
-                .Select(t => t.AssigneeId).ToList();
-
-            RunInTx(() =>
-            {
-                // 所有未完成任务置为跳过
-                var openTasks = Context.Queryable<WfFlowTask>()
-                    .Where(t => t.InstanceId == instanceId && t.Status != (int)WfTaskStatus.Done && t.Status != (int)WfTaskStatus.Skipped)
-                    .ToList();
-                foreach (var t in openTasks)
-                {
-                    t.Status = (int)WfTaskStatus.Skipped;
-                    t.Action = (int)WfAction.Terminate;
-                    t.Opinion = opinion;
-                    t.HandleTime = DateTime.Now;
-                    Context.Updateable(t).ExecuteCommand();
-                }
-
-                instance.Status = (int)WfInstanceStatus.Terminated;
-                SetActiveNodeIds(instance, new List<long>());
-                SyncActiveNodeId(instance);
-                Context.Updateable(instance).ExecuteCommand();
-
-                AddRecord(instanceId, null, null, op, (int)WfAction.Terminate, opinion);
-            }, "AdminTerminate");
-
-            var msg = $"流程【{def.FlowName}】已被管理员{op.NickName}终止";
-            NotifyUser(instance.ApplyUserId, msg);
-            NotifyUserIds(openTaskIds, msg);
-            return Task.CompletedTask;
-        }
-
-        /// <summary>
-        /// 管理员挂起流程（暂停流转，等待恢复）。仅运行中实例可挂起；挂起期间普通审批操作应被前端隐藏，
-        /// 本方法仅置状态，不改动任务。恢复请调 <see cref="AdminResume"/>。
-        /// </summary>
-        public Task AdminSuspend(long instanceId, long operatorId, string opinion)
-        {
-            var instance = Context.Queryable<WfFlowInstance>().First(i => i.InstanceId == instanceId)
-                ?? throw new CustomException("流程实例不存在");
-            if (instance.Status != (int)WfInstanceStatus.Approval)
-                throw new CustomException("仅运行中的流程可挂起");
-
-            var op = LoadUser(operatorId);
-            var def = LoadActivatableDefinition(instance.FlowId);
-
-            RunInTx(() =>
-            {
-                instance.Status = (int)WfInstanceStatus.Suspended;
-                Context.Updateable(instance).ExecuteCommand();
-                AddRecord(instanceId, null, null, op, (int)WfAction.Suspend, opinion);
-            }, "AdminSuspend");
-
-            var msg = $"流程【{def.FlowName}】已被管理员{op.NickName}挂起";
-            NotifyUser(instance.ApplyUserId, msg);
-            return Task.CompletedTask;
-        }
-
-        /// <summary>
-        /// 管理员恢复被挂起的流程。仅 Suspended 态可恢复，恢复后回到 Approval 流转。
-        /// </summary>
-        public Task AdminResume(long instanceId, long operatorId, string opinion)
-        {
-            var instance = Context.Queryable<WfFlowInstance>().First(i => i.InstanceId == instanceId)
-                ?? throw new CustomException("流程实例不存在");
-            if (instance.Status != (int)WfInstanceStatus.Suspended)
-                throw new CustomException("仅被挂起的流程可恢复");
-
-            var op = LoadUser(operatorId);
-            var def = LoadActivatableDefinition(instance.FlowId);
-
-            RunInTx(() =>
-            {
-                instance.Status = (int)WfInstanceStatus.Approval;
-                Context.Updateable(instance).ExecuteCommand();
-                AddRecord(instanceId, null, null, op, (int)WfAction.Resume, opinion);
-            }, "AdminResume");
-
-            var msg = $"流程【{def.FlowName}】已被管理员{op.NickName}恢复";
-            NotifyUser(instance.ApplyUserId, msg);
-            return Task.CompletedTask;
-        }
-
-        /// <summary>
-        /// 管理员改派：把指定节点的全部未完成任务（审批/抄送）重新分配给目标用户。
-        /// 适用于审批人离职/失联，管理员需把卡住的待办改给其他人。节点不存在任务时抛异常。
-        /// </summary>
-        /// <param name="instanceId">流程实例Id</param>
-        /// <param name="nodeId">目标节点（实例当前所处或任意未完成任务所属节点）</param>
-        /// <param name="targetUserId">改派目标用户 userId</param>
-        /// <param name="operatorId">操作管理员 userId</param>
-        /// <param name="opinion">改派说明（可选）</param>
-        public Task AdminReassign(long instanceId, long nodeId, long targetUserId, long operatorId, string opinion)
-        {
-            var instance = Context.Queryable<WfFlowInstance>().First(i => i.InstanceId == instanceId)
-                ?? throw new CustomException("流程实例不存在");
-            if (instance.Status != (int)WfInstanceStatus.Approval && instance.Status != (int)WfInstanceStatus.Suspended)
-                throw new CustomException("仅运行中或挂起态的流程可改派");
-
-            var op = LoadUser(operatorId);
-            var target = LoadUser(targetUserId);
-            var def = LoadActivatableDefinition(instance.FlowId);
-
-            // 业务校验放 RunInTx 之前，确保异常消息能透传给调用方（RunInTx 会用 errorLabel 覆盖内部异常）
-            var tasks = Context.Queryable<WfFlowTask>()
-                .Where(t => t.InstanceId == instanceId && t.NodeId == nodeId
-                    && t.Status != (int)WfTaskStatus.Done && t.Status != (int)WfTaskStatus.Skipped)
-                .ToList();
-            if (tasks.Count == 0)
-                throw new CustomException("该节点无可改派的未完成任务");
-
-            RunInTx(() =>
-            {
-                foreach (var t in tasks)
-                {
-                    t.AssigneeId = target.UserId;
-                    t.Assignee = target.UserName;
-                    t.AssigneeNickName = target.NickName;
-                    t.DelegateId = null;
-                    t.DelegateName = null;
-                    t.IsRead = false;
-                    Context.Updateable(t).ExecuteCommand();
-                    AddRecord(instanceId, t.TaskId, nodeId, op, (int)WfAction.Reassign, $"改派给 {target.NickName}{(string.IsNullOrEmpty(opinion) ? "" : $"：{opinion}")}");
-                }
-            }, "AdminReassign");
-
-            NotifyUser((long?)target.UserId, $"您有流程【{def.FlowName}】的待办已被管理员{op.NickName}改派给您");
-            return Task.CompletedTask;
-        }
-
-        /// <summary>
-        /// 管理员跳转节点：把卡住的实例直接跳到指定节点（重新激活该节点，生成其待办/抄送），
-        /// 清空当前活动集与未完成任务。用于流程设计变更后修复在途实例、或绕过异常节点。不可逆。
-        /// </summary>
-        /// <param name="instanceId">流程实例Id</param>
-        /// <param name="targetNodeId">跳转目标节点（必须存在于该流程且非结束节点）</param>
-        /// <param name="operatorId">操作管理员 userId</param>
-        /// <param name="opinion">跳转说明（可选）</param>
-        public Task AdminJump(long instanceId, long targetNodeId, long operatorId, string opinion)
-        {
-            var instance = Context.Queryable<WfFlowInstance>().First(i => i.InstanceId == instanceId)
-                ?? throw new CustomException("流程实例不存在");
-            if (instance.Status != (int)WfInstanceStatus.Approval && instance.Status != (int)WfInstanceStatus.Suspended)
-                throw new CustomException("仅运行中或挂起态的流程可跳转");
-
-            var op = LoadUser(operatorId);
-            var def = LoadActivatableDefinition(instance.FlowId);
-            var topo = LoadTopology(instance.FlowId);
-            var target = topo.GetNode(targetNodeId)
-                ?? throw new CustomException("跳转目标节点不存在");
-
-            var formValues = ParseFormValues(instance);
-
-            RunInTx(() =>
-            {
-                // 清空当前活动集，把在途未完成任务置为跳过
-                var openTasks = Context.Queryable<WfFlowTask>()
-                    .Where(t => t.InstanceId == instanceId && t.Status != (int)WfTaskStatus.Done && t.Status != (int)WfTaskStatus.Skipped)
-                    .ToList();
-                foreach (var t in openTasks)
-                {
-                    t.Status = (int)WfTaskStatus.Skipped;
-                    t.Action = (int)WfAction.Jump;
-                    t.Opinion = "管理员跳转，原待办作废";
-                    t.HandleTime = DateTime.Now;
-                    Context.Updateable(t).ExecuteCommand();
-                }
-
-                // 恢复流转态（若当前为挂起）+ 清空旧活动集并落库：
-                // 若不先 SetActiveNodeIds(empty)，并行态跳转时旧活动节点(CurrentNodeIds)会残留，
-                // ArriveNode 只 AddActiveNodeId(target) → 活动集变成 [旧A,旧B,target]，CurrentNodeId=Min(旧节点)，
-                // 前端高亮错乱且单值指针取到已跳过节点。参照 RollbackToNode 的写法重置活动集并持久化 Status。
-                SetActiveNodeIds(instance, new List<long>());
-                instance.Status = (int)WfInstanceStatus.Approval;
-                Context.Updateable(instance)
-                    .UpdateColumns(i => new { i.CurrentNodeId, i.CurrentNodeIds, i.Status })
-                    .ExecuteCommand();
-
-                AddRecord(instanceId, null, targetNodeId, op, (int)WfAction.Jump, $"跳转到节点【{target.NodeName}】{(string.IsNullOrEmpty(opinion) ? "" : $"：{opinion}")}");
-
-                // 重新激活目标节点（条件/网关节点会自行顺延或 fork，无需人工处理）。
-                // singleNodeOnly=true：目标若是并行分组内成员，只激活该节点本身（生成其待办/抄送），
-                // 组内其它分支的未完成任务已在上面统一置 Skipped → 并行汇聚判定其已完成，目标分支通过后即可放行，
-                // 不会整组重新 fork、不会多余分支高亮、不会卡死。参照业界（Activiti/钉钉等）单令牌跳转语义。
-                ArriveNode(instance, target, topo, formValues, singleNodeOnly: true);
-                SyncActiveNodeId(instance);
-            }, "AdminJump");
-
-            var msg = $"流程【{def.FlowName}】已被管理员{op.NickName}跳转至节点【{target.NodeName}】";
-            NotifyUser(instance.ApplyUserId, msg);
-            return Task.CompletedTask;
-        }
-
-        #endregion
-
         /// <summary>
         /// 解析当前节点的全部下一节点（多目标，仅供并行分叉网关 fork 用）。
         /// **并行发散语义**：无条件出边全部分支、条件出边中命中的全部分支均作为目标并发返回——
@@ -1853,15 +1464,15 @@ namespace ZR.Workflow.Service
             var outLinks = topo.GetOutLinks(current.NodeId);
             if (outLinks.Count == 0)
             {
-                // 无出边：流程完全无 link（无连线数据）时，fallback 到 NodeOrder 取下一审批/抄送节点，
-                // 兼容早期"仅靠 NodeOrder 串联"的流程（无 wf_node_link）。有 link 则无出边即终点，绝不顺延。
+                // 无出边：仅整图无任何 link 时按 NodeOrder 兜底；有 link 则无出边即终点，绝不顺延到兄弟支。
+                if (topo.NextOf != null && topo.NextOf.Count > 0) return result;
                 var fb = GetNextAuditNode(topo, current.NodeOrder);
                 if (fb != null) result.Add(fb);
                 return result;
             }
             foreach (var link in outLinks) // 已按 Sort 升序
             {
-                if (link.HasCondition && !EvalParsedCondition(link, formValues)) continue;
+                if (link.HasCondition && !WfFormValueHelper.EvalParsedCondition(link, formValues)) continue;
                 var hit = topo.GetNode(link.TargetNodeId);
                 if (hit != null && !result.Contains(hit)) result.Add(hit);
             }
@@ -1921,13 +1532,23 @@ namespace ZR.Workflow.Service
             var outLinks = topo.GetOutLinks(current.NodeId);
             if (outLinks.Count == 0)
             {
-                // 流程完全无 link（早期 NodeOrder 串联流程）时 fallback；有 link 则无出边即终点，绝不顺延
+                // 仅当整图没有任何连线时，才按 NodeOrder 兜底（早期无 link 流程）。
+                // 有 link 时无出边 = 本支路终点；若仍按 NodeOrder 顺延，条件分支叶子会串进兄弟支（如审批人5→审批人6）。
+                if (topo.NextOf != null && topo.NextOf.Count > 0) return null;
                 return GetNextAuditNode(topo, current.NodeOrder);
             }
 
             WfFlowNode defaultTarget = null;
+            WfFlowNode siblingBypass = null;
             foreach (var link in outLinks) // 已按 Sort 升序
             {
+                // 忽略「同一条件网关两个分支列头之间」的错连（并行链扁平化曾把 5→6 存进 link）。
+                // 存量数据若只有这条错连，则改跳到兄弟列头的后继（通常是 JOIN），避免卡死且不经过兄弟节点。
+                if (WfFormValueHelper.IsSiblingConditionBranchLink(current.NodeId, link.TargetNodeId, topo))
+                {
+                    siblingBypass ??= WfFormValueHelper.FirstNonSiblingOutTarget(link.TargetNodeId, topo);
+                    continue;
+                }
                 if (!link.HasCondition)
                 {
                     // 无条件出边 = 默认分支，记录首个作兜底（正常模型至多一条）
@@ -1935,14 +1556,14 @@ namespace ZR.Workflow.Service
                     continue;
                 }
                 // 第一条命中的条件出边立即返回：排他，不再考虑默认分支（默认分支是"无任何条件命中"才走的 fallback）
-                if (EvalParsedCondition(link, formValues))
+                if (WfFormValueHelper.EvalParsedCondition(link, formValues))
                 {
                     var hit = topo.GetNode(link.TargetNodeId);
                     if (hit != null) return hit;
                 }
             }
-            // 无任何条件命中 → 落入默认分支（无条件出边）
-            return defaultTarget;
+            // 无任何条件命中 → 落入默认分支（无条件出边）；再没有则用兄弟错连的汇合后继兜底
+            return defaultTarget ?? siblingBypass;
         }
 
         /// <summary>
@@ -1951,58 +1572,9 @@ namespace ZR.Workflow.Service
         private WfFlowNode GetNextAuditNode(WorkflowTopology topo, int currentOrder)
         {
             return topo.OrderedNodes
-                .Where(n => n.NodeOrder > currentOrder && IsAuditableNode(n.NodeType))
+                .Where(n => n.NodeOrder > currentOrder && WfFormValueHelper.IsAuditableNode(n.NodeType))
                 .OrderBy(n => n.NodeOrder)
                 .FirstOrDefault();
-        }
-
-        /// <summary>
-        /// 运行时评估已预解析的连线条件（<see cref="Model.Topology.WfWorkflowTopologyBuilder"/> 已在构建拓扑时
-        /// 完成 JSON 反序列化 + 静态配置校验，此处只做"取表单字段值 + 比较"）。
-        ///
-        /// **失败语义（2026-08-20 收紧，区分"业务不满足"与"配置错误"）**：
-        /// - 条件不满足（业务 false）→ 返回 false：字段在表单中存在但值为空、或比较结果为 false。
-        ///   此时走正常分支逻辑（可落入默认分支或视为未命中）。
-        /// - 条件配置错误（系统无法判断）→ 抛出 <see cref="CustomException"/>：JSON 解析失败 / field 缺失 /
-        ///   op 缺失或无效 / value 缺失（<paramref name="link"/> 的 <see cref="ResolvedOutLink.ConditionError"/>）、
-        ///   以及"条件字段不在提交的表单中"。
-        ///   这是关键安全语义：若配置错误被吞掉并返回 false，当"所有条件分支都因错误而不满足"时，排他条件网关会把流程
-        ///   误判为正常结束（CompleteInstance），一个配错的流程看起来像"正常审批完成"。故配置错误必须显式失败并触发事务回滚。
-        /// 复用 <see cref="CompareValue"/> 的比较语义，仅数据源来自连线条件。
-        /// </summary>
-        private bool EvalParsedCondition(ResolvedOutLink link, Dictionary<string, string> formValues)
-        {
-            if (!link.HasCondition) return false;
-            if (link.ConditionError != null)
-                throw new CustomException(link.ConditionError);
-            var cond = link.Condition;
-            if (cond == null) return false;
-            return EvalLinkCondition(cond, formValues);
-        }
-
-        /// <summary>
-        /// 递归评估连线条件（叶子单比较 或 And/Or 组合），返回是否满足。
-        /// 组合条件：logic=and 全部满足才 true；logic=or 任一满足即 true。子条件可递归嵌套。
-        /// 配置错误（字段不在表单中）抛出异常触发事务回滚，防止"配置错误导致条件全不满足→流程误结束"。
-        /// </summary>
-        private bool EvalLinkCondition(WfLinkCondition cond, Dictionary<string, string> formValues)
-        {
-            if (cond.IsComposite)
-            {
-                var logic = (cond.Logic ?? string.Empty).ToLowerInvariant() == "or";
-                foreach (var sub in cond.Conditions)
-                {
-                    var hit = EvalLinkCondition(sub, formValues);
-                    if (logic && hit) return true;   // or：任一满足即 true
-                    if (!logic && !hit) return false; // and：任一不满足即 false
-                }
-                return logic ? false : true; // or：全不满足 → false；and：全满足 → true
-            }
-            // 叶子条件：单比较
-            if (!formValues.TryGetValue(cond.Field, out var raw))
-                throw new CustomException($"条件配置错误：连线条件引用的表单字段【{cond.Field}】不在提交的表单中");
-            if (string.IsNullOrWhiteSpace(raw)) return false; // 字段存在但值为空：业务不满足（保守，不误走该分支）
-            return CompareValue((WfConditionOp)cond.Op.Value, raw, cond.Value);
         }
 
         /// <summary>
@@ -2097,506 +1669,13 @@ namespace ZR.Workflow.Service
                 if (link != null)
                 {
                     if (!link.HasCondition) return true; // 无条件出边：并发激活
-                    return EvalParsedCondition(link, formValues);
+                    return WfFormValueHelper.EvalParsedCondition(link, formValues);
                 }
             }
             return true; // 无分叉出边：并发激活
         }
 
-        /// <summary>
-        /// 条件比较核心：节点条件 / 连线条件共用。
-        /// 两端都能解析为 double 时按数值比较，否则按 OrdinalIgnoreCase 字符串比较。
-        /// - Eq/Ne 始终按字符串比较（忽略大小写），避免 "1" vs "1.0" 数值相等的歧义。
-        /// - 未知 op 视为 false（连线场景保守）/ true（节点场景：节点条件不严谨时仍放行）。
-        /// 调用方应先保证 op 落在 <see cref="WfConditionOp"/> 范围。
-        /// </summary>
-        private static bool CompareValue(WfConditionOp op, string raw, string target)
-        {
-            var leftOk = double.TryParse(raw, out var left);
-            var rightOk = double.TryParse(target, out var right);
-            var bothNum = leftOk && rightOk;
-            switch (op)
-            {
-                case WfConditionOp.Lt: return bothNum ? left < right : string.CompareOrdinal(raw, target) < 0;
-                case WfConditionOp.Le: return bothNum ? left <= right : string.CompareOrdinal(raw, target) <= 0;
-                case WfConditionOp.Gt: return bothNum ? left > right : string.CompareOrdinal(raw, target) > 0;
-                case WfConditionOp.Ge: return bothNum ? left >= right : string.CompareOrdinal(raw, target) >= 0;
-                case WfConditionOp.Eq: return string.Equals(raw, target, StringComparison.OrdinalIgnoreCase);
-                case WfConditionOp.Ne: return !string.Equals(raw, target, StringComparison.OrdinalIgnoreCase);
-                default: return false;
-            }
-        }
-
         #endregion
 
-        #region 审批人解析与通知
-
-        /// <summary>
-        /// 解析后的审批人（直接用 UserId 落库，不依赖 userName 反查）。
-        /// </summary>
-        private sealed record ResolvedApprover(long UserId, string UserName, string NickName);
-
-        /// <summary>
-        /// 有效用户查询起点：未删除（DelFlag==0）且未停用（Status==0）。
-        /// 引擎内所有取用户处统一复用，避免审批人解析/转办等场景选到已删除或停用的用户导致流程卡死。
-        /// </summary>
-        private ISugarQueryable<SysUser> ActiveUsers()
-            => Context.Queryable<SysUser>().Where(u => u.DelFlag == 0 && u.Status == 0);
-
-        /// <summary>
-        /// 解析节点审批人列表，统一返回 (UserId, UserName, NickName)。
-        /// 定义态存的是稳定标识：ApproverType=0/指定用户存 userId；
-        /// =1 角色Id；=2 部门Id；=3 表单字段 key，字段值为逗号分隔的 userId；
-        /// =4 部门负责人（ApproverId 存部门Id，取部门 LeaderIds）；=5 发起人主管（取流程发起人 LeaderId）。
-        /// 所有分支最终都查 SysUser 得到 UserId，运行态任务/记录直接用 UserId，避免 userName 变更失效。
-        /// 各类型解析逻辑由 <see cref="IApproverResolver"/> 策略实现，此处仅查表分发 + 统一去重兜底。
-        /// </summary>
-        private List<ResolvedApprover> ResolveApprovers(WfFlowNode node, Dictionary<string, string> formValues, long? applyUserId = null)
-        {
-            if (!_approverResolvers.TryGetValue((WfApproverType)node.ApproverType, out var resolver))
-            {
-                // 未知审批人类型：返回空并告警，避免误当指定用户解析
-                logger.Warn($"审批人类型未知：Node={node.NodeName}({node.NodeId}) ApproverType={node.ApproverType} ApproverId={node.ApproverId}");
-                return new List<ResolvedApprover>();
-            }
-
-            var users = resolver.Resolve(node, formValues, applyUserId);
-            // 最终按 UserId 去重兜底，防止上游分支 Distinct 遗漏导致同一审批人重复
-            return users
-                .GroupBy(u => u.UserId)
-                .Select(g => g.First())
-                .Select(u => new ResolvedApprover(u.UserId, u.UserName, u.NickName))
-                .ToList();
-        }
-
-        /// <summary>
-        /// 按 userId 列表解析为 ResolvedApprover（加签等以 userId 传入的场景）。
-        /// 不存在的 Id 静默丢弃，由调用方判断结果是否为空。
-        /// </summary>
-        private List<ResolvedApprover> ResolveByUserIds(List<long> userIds)
-        {
-            if (userIds == null || userIds.Count == 0) return new List<ResolvedApprover>();
-            var ids = userIds.Where(id => id > 0).Distinct().ToList();
-            if (ids.Count == 0) return new List<ResolvedApprover>();
-            return ActiveUsers().Where(u => ids.Contains(u.UserId))
-                .Select(u => new ResolvedApprover(u.UserId, u.UserName, u.NickName))
-                .ToList();
-        }
-
-        /// <summary>
-        /// 审批人解析策略：按 WfApproverType 各自实现「从节点定义 + 表单值解析出有效用户列表」。
-        /// 新增审批人类型时实现本接口并在构造函数注册即可，无需改动 ResolveApprovers 的分发逻辑。
-        /// </summary>
-        private interface IApproverResolver
-        {
-            List<SysUser> Resolve(WfFlowNode node, Dictionary<string, string> formValues, long? applyUserId);
-        }
-
-        /// <summary>解析策略基类：复用引擎的 ActiveUsers()（有效用户谓词）与 Context。</summary>
-        private abstract class ApproverResolverBase : IApproverResolver
-        {
-            protected readonly WfEngineService Engine;
-
-            protected ApproverResolverBase(WfEngineService engine) => Engine = engine;
-
-            public abstract List<SysUser> Resolve(WfFlowNode node, Dictionary<string, string> formValues, long? applyUserId);
-
-            /// <summary>ApproverId 逗号分隔解析为 long 列表（非法值丢弃）。</summary>
-            protected static List<long> ParseIds(string approverId)
-                => (approverId ?? "").SplitByComma()
-                    .Select(s => long.TryParse(s, out var v) ? v : (long?)null)
-                    .Where(v => v.HasValue)
-                    .Select(v => v.Value)
-                    .ToList();
-        }
-
-        /// <summary>指定用户：ApproverId 存 userId（逗号分隔，数字）。</summary>
-        private sealed class UserApproverResolver : ApproverResolverBase
-        {
-            public UserApproverResolver(WfEngineService engine) : base(engine) { }
-
-            public override List<SysUser> Resolve(WfFlowNode node, Dictionary<string, string> formValues, long? applyUserId)
-            {
-                var userIds = ParseIds(node.ApproverId).Where(id => id > 0).Distinct().ToList();
-                if (userIds.Count == 0) return new List<SysUser>();
-                return Engine.ActiveUsers().Where(u => userIds.Contains(u.UserId)).Distinct().ToList();
-            }
-        }
-
-        /// <summary>指定角色：ApproverId 存角色Id（逗号分隔），取拥有这些角色的用户。</summary>
-        private sealed class RoleApproverResolver : ApproverResolverBase
-        {
-            public RoleApproverResolver(WfEngineService engine) : base(engine) { }
-
-            public override List<SysUser> Resolve(WfFlowNode node, Dictionary<string, string> formValues, long? applyUserId)
-            {
-                var roleIds = ParseIds(node.ApproverId);
-                if (roleIds.Count == 0) return new List<SysUser>();
-                return Engine.ActiveUsers()
-                    .InnerJoin<SysUserRole>((u, ur) => u.UserId == ur.UserId)
-                    .Where((u, ur) => roleIds.Contains(ur.RoleId))
-                    .Distinct()
-                    .ToList();
-            }
-        }
-
-        /// <summary>指定部门：ApproverId 存部门Id（逗号分隔），取这些部门下所有有效用户。</summary>
-        private sealed class DeptApproverResolver : ApproverResolverBase
-        {
-            public DeptApproverResolver(WfEngineService engine) : base(engine) { }
-
-            public override List<SysUser> Resolve(WfFlowNode node, Dictionary<string, string> formValues, long? applyUserId)
-            {
-                var deptIds = ParseIds(node.ApproverId);
-                if (deptIds.Count == 0) return new List<SysUser>();
-                return Engine.ActiveUsers().Where(u => deptIds.Contains(u.DeptId)).Distinct().ToList();
-            }
-        }
-
-        /// <summary>表单字段动态审批人：ApproverId 为表单字段 key，字段值为逗号分隔的 userId（兼容 "userId:userName" 格式，取冒号前的数字部分）。</summary>
-        private sealed class FormFieldApproverResolver : ApproverResolverBase
-        {
-            public FormFieldApproverResolver(WfEngineService engine) : base(engine) { }
-
-            public override List<SysUser> Resolve(WfFlowNode node, Dictionary<string, string> formValues, long? applyUserId)
-            {
-                var key = node.ApproverId ?? "";
-                if (string.IsNullOrWhiteSpace(key) || formValues == null || !formValues.TryGetValue(key, out var raw) || string.IsNullOrWhiteSpace(raw))
-                    return new List<SysUser>();
-                var userIds = raw.SplitByComma()
-                    .Select(s => {
-                        // 兼容 "userId:userName" 格式：取冒号前的纯数字部分
-                        var idx = s.IndexOf(':');
-                        var numStr = idx > 0 ? s.Substring(0, idx) : s;
-                        return long.TryParse(numStr, out var id) && id > 0 ? id : 0;
-                    })
-                    .Where(id => id > 0)
-                    .Distinct()
-                    .ToList();
-                if (userIds.Count == 0) return new List<SysUser>();
-                return Engine.ActiveUsers().Where(u => userIds.Contains(u.UserId)).Distinct().ToList();
-            }
-        }
-
-        /// <summary>部门负责人：ApproverId 存部门Id（逗号分隔），解析这些部门 LeaderIds 对应的有效用户。</summary>
-        private sealed class DeptLeaderApproverResolver : ApproverResolverBase
-        {
-            public DeptLeaderApproverResolver(WfEngineService engine) : base(engine) { }
-
-            public override List<SysUser> Resolve(WfFlowNode node, Dictionary<string, string> formValues, long? applyUserId)
-            {
-                var deptIds = ParseIds(node.ApproverId);
-                if (deptIds.Count == 0) return new List<SysUser>();
-                var leaderIdStrs = Engine.Context.Queryable<SysDept>()
-                    .Where(d => deptIds.Contains(d.DeptId) && d.DelFlag == 0)
-                    .Select(d => d.LeaderIds)
-                    .ToList()
-                    .Where(s => !string.IsNullOrWhiteSpace(s))
-                    .SelectMany(s => s.SplitByComma())
-                    .Where(s => long.TryParse(s, out var id) && id > 0)
-                    .Select(s => long.Parse(s))
-                    .Distinct()
-                    .ToList();
-                if (leaderIdStrs.Count == 0) return new List<SysUser>();
-                return Engine.ActiveUsers().Where(u => leaderIdStrs.Contains(u.UserId)).Distinct().ToList();
-            }
-        }
-
-        /// <summary>发起人主管：ApproverId 为空，运行时取流程发起人 SysUser.LeaderId 对应的有效用户。</summary>
-        private sealed class ApplyLeaderApproverResolver : ApproverResolverBase
-        {
-            public ApplyLeaderApproverResolver(WfEngineService engine) : base(engine) { }
-
-            public override List<SysUser> Resolve(WfFlowNode node, Dictionary<string, string> formValues, long? applyUserId)
-            {
-                if (applyUserId == null || applyUserId <= 0) return new List<SysUser>();
-                var leaderId = Engine.Context.Queryable<SysUser>()
-                    .Where(u => u.UserId == applyUserId)
-                    .Select(u => u.LeaderId)
-                    .ToList()
-                    .FirstOrDefault();
-                if (leaderId == null || leaderId <= 0) return new List<SysUser>();
-                return Engine.ActiveUsers().Where(u => u.UserId == leaderId).Distinct().ToList();
-            }
-        }
-
-        /// <summary>
-        /// 由实例上的申请人快照（ApplyUserId / ApplyUser / ApplyNickName）构造操作人，
-        /// 用于"发起 / 自动跳过"这类以申请人名义落记录的场景，无需再查用户表。
-        /// </summary>
-        private static ResolvedApprover ApplicantOf(WfFlowInstance instance)
-            => new(instance.ApplyUserId ?? 0, instance.ApplyUser, instance.ApplyNickName);
-
-        /// <summary>
-        /// 批量创建任务（待办/抄送），替代逐条 ExecuteCommand 以减少数据库往返
-        /// </summary>
-        private void BatchCreateTasks(long instanceId, long nodeId, string nodeName, List<ResolvedApprover> assignees, int status, string createBy, DateTime? createTime = null, bool sequential = false, DateTime? deadlineTime = null)
-        {
-            if (assignees == null || assignees.Count == 0) return;
-            var now = createTime ?? DateTime.Now;
-            var tasks = assignees.Select((a, idx) => new WfFlowTask
-            {
-                InstanceId = instanceId,
-                NodeId = nodeId,
-                NodeName = nodeName,
-                Assignee = a.UserName,
-                AssigneeId = a.UserId,
-                AssigneeNickName = a.NickName,
-                // 依次审批：仅首位激活为传入 status，其余置 Waiting 排队，前一人完成才轮到下一位
-                Status = (sequential && idx > 0) ? (int)WfTaskStatus.Waiting : status,
-                // 超时埋点：待办到达时间 + 截止时间（仅当节点配置了 TimeoutHours>0 时由调用方传入 deadlineTime）
-                ArriveTime = now,
-                DeadlineTime = deadlineTime,
-                Create_time = now,
-                Create_by = createBy
-            }).ToList();
-            Context.Insertable(tasks).ExecuteCommand();
-        }
-
-        /// <summary>
-        /// 根据节点超时配置计算待办截止时间。TimeoutHours>0 时返回 ArriveTime + TimeoutHours（小时），
-        /// 否则返回 null（无超时约束）。供 ArriveNode 生成审批待办时传入 BatchCreateTasks。
-        /// </summary>
-        private static DateTime? ComputeDeadline(WfFlowNode node, DateTime arriveTime)
-            => node.TimeoutHours > 0 ? arriveTime.AddHours(node.TimeoutHours) : (DateTime?)null;
-
-        /// <summary>
-        /// 审批人为空时生成一条 Skipped 留痕任务 + 操作记录（节点自动通过）。
-        /// 用于部门未配置负责人 / 发起人无主管 / 指定用户已删除等场景，避免流程卡死在无待办的节点。
-        /// 参考业界（钉钉/飞书/Activiti）「审批人为空则节点自动跳过」策略，复用抄送节点的 Skipped 模式。
-        /// </summary>
-        private void CreateAutoSkipTask(WfFlowInstance instance, WfFlowNode node, string reason)
-        {
-            // 幂等保护：同一节点已存在任何任务（Pending/Done/Skipped）则不再建第二条 Skipped 留痕。
-            // 重复来源：同一多入边/并行分叉节点可能同时被两条路径处理——
-            //   ① SkipBranchChain 级联（"上游条件不满足，分支自动跳过"）
-            //   ② ArriveNode 实际到达（"审批人为空，节点自动跳过" / 并行分组 fork）
-            // 两条路径在同一事务内先后执行，任一路径先建任务后，另一路径必须跳过，否则同一节点出现两条不同原因的 AutoSkip 记录。
-            var existed = Context.Queryable<WfFlowTask>().Any(t => t.InstanceId == instance.InstanceId && t.NodeId == node.NodeId);
-            if (existed) return;
-            // Assignee 列 NOT NULL，自动跳过无具体审批人，用申请人登录名占位（或系统常量兜底）。
-            var skipAssignee = string.IsNullOrEmpty(instance.ApplyUser) ? "__SYSTEM__" : instance.ApplyUser;
-            Context.Insertable(new WfFlowTask
-            {
-                InstanceId = instance.InstanceId,
-                NodeId = node.NodeId,
-                NodeName = node.NodeName,
-                Assignee = skipAssignee,
-                AssigneeId = instance.ApplyUserId,
-                AssigneeNickName = instance.ApplyNickName,
-                Status = (int)WfTaskStatus.Skipped,
-                TaskType = (int)WfTaskType.Audit,
-                Create_time = DateTime.Now,
-                Create_by = instance.ApplyUser
-            }).ExecuteCommand();
-            AddRecord(instance.InstanceId, null, node.NodeId, ApplicantOf(instance), (int)WfAction.AutoSkip, reason);
-        }
-
-        /// <summary>
-        /// 排他条件节点（或任意"条件不满足"节点）顺延跳过时，对**每条条件不满足的出边**沿下游链路级联建 Skipped 留痕。
-        /// 目的：被跳过的分支若下游直接汇入汇聚网关(8)/并行分组出口，其末端业务节点（Audit/Cc）会因"从未被 ArriveNode"
-        /// 而没有任何任务；IsNodeComplete 已规定"无 task = 未激活 = 未完成"，从而 Join 汇聚会傻等这个永远到不了的节点而卡死。
-        /// 级联留痕后，这些节点的 IsNodeComplete 因有 Skipped → 返回完成，Join 正确放行，使"未到达 / 跳过 / 已完成"三态收敛为两态
-        /// （激活态走正常判定；跳过态 Skipped→完成；无 task 只可能出现在"本就不该走到"的分支，Join 不会等待它）。
-        /// 级联边界：遇 ParallelFork(7)/ParallelJoin(8)/流程终点停止，不跨汇聚网关污染其它分支；节点已存在任务（Pending/Done/Skipped）则跳过，避免重复留痕。
-        /// </summary>
-        private void SkipRejectedBranches(WfFlowInstance instance, WfFlowNode node, WorkflowTopology topo, Dictionary<string, string> formValues, int depth)
-        {
-            var outLinks = topo.GetOutLinks(node.NodeId);
-            if (outLinks.Count == 0) return;
-            foreach (var link in outLinks)
-            {
-                // 仅处理"条件不满足"的出边（无条件默认分支视为满足，已被 ResolveNextNode 顺延走到，不在此标）
-                if (!link.HasCondition || EvalParsedCondition(link, formValues)) continue;
-                var target = topo.GetNode(link.TargetNodeId);
-                if (target == null) continue;
-                SkipBranchChain(instance, target, topo, formValues, new HashSet<long>(), depth);
-            }
-        }
-
-        /// <summary>
-        /// 从 branchStart 出发沿出边 DFS 下游链路，把被跳过分支整条链"建 Skipped 留痕 + 激活下游汇聚点"。
-        /// - Audit/Cc：建 Skipped（不建 Pending）；继续沿下游链递归（不调 ArriveNode，避免落入正常待办逻辑）。
-        /// - 条件网关：自身不建留痕，但其"满足出边"应由调用方 ArriveNode，故此处仅对"不满足出边"递归（防重复时由 visited 去重）。
-        /// - ParallelJoin(8)：不建留痕，但需 ArriveNode 激活汇聚网关（让它与其它真实分支一起等待 join），随后停止本链（不跨网关污染另一分支）。
-        /// - ParallelFork(7)/流程终点：停止，不跨并行子图。
-        /// 已存在任务（Pending/Done/Skipped）的节点跳过留痕，但仍继续向下游级联（如条件网关已留痕但下游分支还需标）。
-        /// </summary>
-        private void SkipBranchChain(WfFlowInstance instance, WfFlowNode branchStart, WorkflowTopology topo, Dictionary<string, string> formValues, HashSet<long> visited, int depth)
-        {
-            if (branchStart == null || visited.Contains(branchStart.NodeId)) return;
-            visited.Add(branchStart.NodeId);
-
-            // 汇聚网关：激活它（等其它分支），不跨网关继续
-            if (branchStart.NodeType == (int)WfNodeType.ParallelJoin)
-            {
-                ArriveNode(instance, branchStart, topo, formValues, depth: depth);
-                return;
-            }
-            // 分叉网关 / 终点：不进入并行子图，停止
-            if (branchStart.NodeType == (int)WfNodeType.ParallelFork) return;
-
-            // 真实业务节点（Audit/Cc）：建 Skipped 留痕（CreateAutoSkipTask 内部已做"已存在任务则跳过"的幂等保护），继续沿下游链级联
-            if (branchStart.NodeType == (int)WfNodeType.Audit || branchStart.NodeType == (int)WfNodeType.Cc)
-            {
-                CreateAutoSkipTask(instance, branchStart, "上游条件不满足，分支自动跳过");
-            }
-
-            // 向下游继续级联（终点无出边自然停止）
-            foreach (var l in topo.GetOutLinks(branchStart.NodeId))
-            {
-                var next = topo.GetNode(l.TargetNodeId);
-                if (next != null) SkipBranchChain(instance, next, topo, formValues, visited, depth);
-            }
-        }
-
-        /// <summary>
-        /// 生成抄送任务并落库抄送记录、推送通知；审批人昵称一并快照。
-        /// </summary>
-        private void CreateCcTask(WfFlowInstance instance, WfFlowNode node, Dictionary<string, string> formValues)
-        {
-            var ccList = ResolveApprovers(node, formValues, instance.ApplyUserId);
-            logger.Info($"生成抄送：InstanceId={instance.InstanceId} Node={node.NodeName}({node.NodeId}) 抄送人={ccList.Count}");
-            var ccUsers = string.Join(",", ccList.Select(c => c.UserName));
-            var ccUserIds = string.Join(",", ccList.Select(c => c.UserId));
-            var ccNick = string.Join(",", ccList.Select(c => c.NickName));
-            Context.Insertable(new WfFlowTask
-            {
-                InstanceId = instance.InstanceId,
-                NodeId = node.NodeId,
-                NodeName = node.NodeName,
-                Assignee = ccUsers,
-                AssigneeId = null,
-                AssigneeNickName = ccNick,
-                Status = (int)WfTaskStatus.Skipped,
-                TaskType = (int)WfTaskType.Cc,
-                Create_time = DateTime.Now,
-                Create_by = instance.ApplyUser
-            }).ExecuteCommand();
-            // 每个收件人落一条抄送记录并写入各自的 OperatorId（userId），便于按 userId 精确匹配（抄送给我/数据面板）。
-            // 批量 Insertable 一次入库，避免逐条 ExecuteCommand 的多次往返。
-            var now = DateTime.Now;
-            Context.Insertable(ccList.Select(c => new WfFlowRecord
-            {
-                InstanceId = instance.InstanceId,
-                TaskId = null,
-                NodeId = node.NodeId,
-                Operator = c.UserName,
-                OperatorId = c.UserId,
-                OperatorNickName = c.NickName,
-                Action = (int)WfAction.Cc,
-                Opinion = "抄送",
-                Create_time = now,
-                Create_by = c.UserName
-            }).ToList()).ExecuteCommand();
-            NotifyUsers(ccList, $"【审批抄送】{instance.Title}（{instance.FlowName}）抄送知会，请知悉。");
-        }
-
-        /// <summary>
-        /// 统一创建流程操作记录。操作人以 <see cref="ResolvedApprover"/>（userId + 名称快照）传入，
-        /// 调用方已持有完整身份，此处不再按登录名反查用户表。
-        /// 落库后，对"审批类动作"异步生成 AI 摘要写回（不阻塞主流程，异常不影响主链路）。
-        /// </summary>
-        private void AddRecord(long instanceId, long? taskId, long? nodeId, ResolvedApprover op, int action, string opinion, DateTime? createTime = null)
-        {
-            var record = new WfFlowRecord
-            {
-                InstanceId = instanceId,
-                TaskId = taskId,
-                NodeId = nodeId,
-                Operator = op.UserName,
-                OperatorId = op.UserId,
-                OperatorNickName = op.NickName,
-                Action = action,
-                Opinion = opinion,
-                Create_time = createTime ?? DateTime.Now,
-                Create_by = op.UserName
-            };
-            Context.Insertable(record).ExecuteCommand();
-
-            // 提交后 AI 摘要（仅审批类动作：同意/驳回/转交/加签/减签/委托/管理员跳转/重新提交/撤回/催办）
-            if (action != (int)WfAction.Submit && action != (int)WfAction.Cc && action != (int)WfAction.AutoSkip)
-            {
-                var nodeName = GetNodeNameSafe(nodeId);
-                _ = GenerateRecordSummaryAsync(record.RecordId, instanceId, nodeName, opinion);
-            }
-        }
-
-        /// <summary>
-        /// 异步生成审批记录 AI 摘要并写回（fire-and-forget，异常吞掉不影响主流程）
-        /// </summary>
-        private async Task GenerateRecordSummaryAsync(long recordId, long instanceId, string nodeName, string opinion)
-        {
-            try
-            {
-                var inst = await Context.Queryable<WfFlowInstance>()
-                    .Where(i => i.InstanceId == instanceId)
-                    .FirstAsync();
-                var formItems = await Context.Queryable<WfFlowDefinition>()
-                    .Where(d => d.FlowId == inst.FlowId)
-                    .Select(d => d.FormItems)
-                    .FirstAsync();
-                // 表单字段技术名翻译为中文label，避免 input_1 等暴露给 AI/用户
-                var formText = WfFormTextHelper.TranslateToText(inst.FormContent, formItems) ?? inst.FormContent;
-                var summary = await _aiService.SummarizeApprovalAsync(string.Empty, nodeName, opinion, formText);
-                if (!string.IsNullOrWhiteSpace(summary?.Summary))
-                {
-                    await Context.Updateable<WfFlowRecord>()
-                        .SetColumns(r => r.Summary == summary.Summary)
-                        .Where(r => r.RecordId == recordId)
-                        .ExecuteCommandAsync();
-                }
-            }
-            catch (Exception ex)
-            {
-                // AI 摘要失败不应影响主流程，仅记录日志
-                logger.Warn(ex, $"生成审批记录 AI 摘要失败 recordId={recordId}");
-            }
-        }
-
-        private string GetNodeNameSafe(long? nodeId)
-        {
-            if (!nodeId.HasValue) return string.Empty;
-            return Context.Queryable<WfFlowNode>().Where(n => n.NodeId == nodeId.Value).Select(n => n.NodeName).First() ?? string.Empty;
-        }
-
-        /// <summary>
-        /// 站内信通知：落库并 SignalR 实时推送（异常不影响主流程）
-        /// </summary>
-        private void Notify(long userId, string content)
-        {
-            try { _msgService.AddSysUserMsg(userId, content, UserMsgType.WORKFLOW); }
-            catch { /* 通知失败不影响流程主逻辑 */ }
-        }
-
-        /// <summary>
-        /// 批量通知一组审批人（直接用 UserId 推送，无需反查用户表）
-        /// </summary>
-        private void NotifyUsers(List<ResolvedApprover> approvers, string content)
-        {
-            if (approvers == null) return;
-            foreach (var a in approvers.Distinct())
-                Notify(a.UserId, content);
-        }
-
-        /// <summary>
-        /// 按 userId 集合批量通知（如撤回时通知全部待办审批人）。null 元素与重复项自动忽略。
-        /// </summary>
-        private void NotifyUserIds(IEnumerable<long?> userIds, string content)
-        {
-            if (userIds == null) return;
-            foreach (var id in userIds.Where(i => i.HasValue && i.Value > 0).Select(i => i.Value).Distinct())
-                Notify(id, content);
-        }
-
-        /// <summary>
-        /// 通知单个用户（userId 为空/非法时静默跳过，如存量实例缺 ApplyUserId）。
-        /// </summary>
-        private void NotifyUser(long? userId, string content)
-        {
-            if (userId.HasValue && userId.Value > 0) Notify(userId.Value, content);
-        }
-
-        #endregion
     }
 }
