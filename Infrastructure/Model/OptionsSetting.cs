@@ -76,6 +76,33 @@ namespace Infrastructure.Model
         /// AI 配置
         /// </summary>
         public AiOptions AiOptions { get; set; }
+        /// <summary>
+        /// 工作流配置
+        /// </summary>
+        public WorkflowOptions Workflow { get; set; } = new WorkflowOptions();
+    }
+    /// <summary>
+    /// 工作流模块配置
+    /// </summary>
+    public class WorkflowOptions
+    {
+        /// <summary>
+        /// 通知渠道配置（站内信始终发送；邮件/短信按此开关额外分发）
+        /// </summary>
+        public WorkflowNotifyOptions Notify { get; set; } = new WorkflowNotifyOptions();
+    }
+    /// <summary>
+    /// 工作流通知渠道开关。外部渠道仅对"行动类"通知生效（待办/催办/转办/委托/加签/改派等需要用户处理的消息），
+    /// 进度/撤回/终止等知会类通知不发邮件短信，避免打扰。
+    /// </summary>
+    public class WorkflowNotifyOptions
+    {
+        /// <summary>是否通过邮件分发行动类通知（需先配置 MailOptions 发件邮箱）</summary>
+        public bool EmailEnabled { get; set; }
+        /// <summary>是否通过短信分发行动类通知（真实发送还需 SmsOptions.Enabled=true 并配置 workflow 模板）</summary>
+        public bool SmsEnabled { get; set; }
+        /// <summary>工作流通知邮件使用的发件人配置（对应 MailOptions 数组中的 FromName，取第一个匹配项；为空用第一项）</summary>
+        public string MailFromName { get; set; } = "system";
     }
     /// <summary>
     /// 发送邮件数据配置
