@@ -79,6 +79,9 @@ namespace ZR.ServiceCore.Services
                         new("新增", "workflow:definition:add"), new("修改", "workflow:definition:edit"), new("删除", "workflow:definition:delete"),
                         new("AI生成", "workflow:definition:ai"),
                         new("AI体检", "workflow:definition:ai-analyze"),
+                        new("模拟试运行", "workflow:definition:simulate"),
+                        new("导出", "workflow:definition:export"),
+                        new("导入", "workflow:definition:import"),
                     ]),
                 // 表单模板：可复用动态表单的管理页（供流程设计器"载入模板"复用）
                 new(Name: "表单模板", Path: "formTemplate", Component: "workflow/formTemplate/index", Perms: "workflow:template:list", OrderNum: 2, Category: 0, Icon: "list",

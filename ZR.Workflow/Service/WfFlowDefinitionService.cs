@@ -224,6 +224,27 @@ namespace ZR.Workflow.Service
         }
 
         /// <summary>
+        /// 导入流程定义：以导出 JSON 数据新建流程。
+        /// 重置 FlowId/状态/版本/草稿态（导出数据不携带运行态语义），随后走 Add 保存链路——
+        /// FlowCode 唯一校验、连线校验（ValidateLinks）、节点/连线写入与重映射全部复用 Add，无第二套导入逻辑。
+        /// </summary>
+        public WfFlowDefinition Import(WfFlowDefinitionDto dto)
+        {
+            if (dto == null) throw new CustomException(ResultCode.CUSTOM_ERROR, "导入数据为空", null);
+            if (string.IsNullOrWhiteSpace(dto.FlowCode) || string.IsNullOrWhiteSpace(dto.FlowName))
+                throw new CustomException(ResultCode.CUSTOM_ERROR, "导入数据缺少流程编码或名称", null);
+            if (dto.Nodes == null || dto.Nodes.Count == 0)
+                throw new CustomException(ResultCode.CUSTOM_ERROR, "导入数据不含任何节点，请确认导入的是流程定义导出文件", null);
+
+            dto.FlowId = 0;
+            dto.Status = 0;   // 导入后默认停用，确认配置无误后再启用
+            dto.Version = 1;
+            dto.IsDraft = 0;
+            dto.IsCurrent = false;
+            return Add(dto);
+        }
+
+        /// <summary>
         /// 内部：复制某版本定义与节点到新 FlowId，Version=该 FlowCode 当前最大+1，默认草稿态。
         /// 供 SaveAsNewVersion(手动另存) 与 Rollback(回滚) 共用。
         /// </summary>

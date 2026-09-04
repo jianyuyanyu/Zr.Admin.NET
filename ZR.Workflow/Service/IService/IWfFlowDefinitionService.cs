@@ -37,5 +37,9 @@ namespace ZR.Workflow.Service.IService
         /// 版本回滚：将指定历史版本复制为新的最高版本（草稿态），保留完整版本链路
         /// </summary>
         long Rollback(long flowId, string userName);
+        /// <summary>
+        /// 导入流程定义：以 JSON 导出的定义数据新建流程（重置状态/版本，走 Add 保存链路）
+        /// </summary>
+        WfFlowDefinition Import(WfFlowDefinitionDto dto);
     }
 }

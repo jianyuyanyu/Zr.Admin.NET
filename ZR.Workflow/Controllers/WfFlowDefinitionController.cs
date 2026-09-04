@@ -11,10 +11,12 @@ namespace ZR.Workflow.Controllers
     public class WfFlowDefinitionController : BaseController
     {
         private readonly IWfFlowDefinitionService _service;
+        private readonly IWfEngineService _engineService;
 
-        public WfFlowDefinitionController(IWfFlowDefinitionService service)
+        public WfFlowDefinitionController(IWfFlowDefinitionService service, IWfEngineService engineService)
         {
             _service = service;
+            _engineService = engineService;
         }
 
         /// <summary>
@@ -154,6 +156,43 @@ namespace ZR.Workflow.Controllers
             var userName = HttpContext.GetName();
             var newId = _service.Rollback(flowId, userName);
             return SUCCESS(newId);
+        }
+
+        /// <summary>
+        /// 流程模拟试运行：按给定表单推演审批路线（纯推演不落库），用于发布/发起前验证流程配置
+        /// </summary>
+        [HttpPost("simulate")]
+        [ActionPermissionFilter(Permission = "workflow:definition:simulate")]
+        public IActionResult Simulate([FromBody] WfSimulateInputDto parm)
+        {
+            parm ??= new WfSimulateInputDto();
+            parm.ApplyUserId ??= HttpContext.GetUId();
+            return SUCCESS(_engineService.Simulate(parm));
+        }
+
+        /// <summary>
+        /// 导出流程定义（含节点与连线，JSON 格式，供导入或跨环境迁移）
+        /// </summary>
+        [HttpGet("export/{flowId}")]
+        [ActionPermissionFilter(Permission = "workflow:definition:export")]
+        [Log(Title = "流程定义", BusinessType = BusinessType.EXPORT)]
+        public IActionResult Export(long flowId)
+        {
+            var dto = _service.GetInfo(flowId);
+            if (dto == null) return ToResponse(ResultCode.CUSTOM_ERROR, "流程定义不存在");
+            return SUCCESS(dto);
+        }
+
+        /// <summary>
+        /// 导入流程定义：以导出 JSON 数据新建流程（导入后默认停用，FlowCode 与已有流程冲突时将被拒绝）
+        /// </summary>
+        [HttpPost("import")]
+        [ActionPermissionFilter(Permission = "workflow:definition:import")]
+        [Log(Title = "流程定义", BusinessType = BusinessType.INSERT)]
+        public IActionResult Import([FromBody] WfFlowDefinitionDto parm)
+        {
+            if (parm == null) return ToResponse(ResultCode.PARAM_ERROR, "导入数据为空");
+            return SUCCESS(_service.Import(parm));
         }
     }
 }
