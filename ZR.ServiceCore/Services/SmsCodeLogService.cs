@@ -112,6 +112,9 @@ namespace ZR.ServiceCore.Services
         /// 发送通知类短信（如订单发货通知）。
         /// 与 AddSmscodeLog 区别：不生成验证码、不做验证码频控、不写缓存。
         /// 先落库（SendStatus=待发送）后台异步发送，不阻塞业务流程；发送结果异步回写库。
+        /// 注意：后台线程不能复用请求级 scoped <c>Context</c>（请求结束后连接释放、租户上下文丢失），
+        /// 须在请求内先捕获租户 Id（<see cref="BackgroundDbHelper.CaptureTenantId"/>），
+        /// 任务内用 <see cref="BackgroundDbHelper.CreateBackgroundDb"/> 建独立连接并按租户路由。
         /// </summary>
         public SmsCodeLog SendSmsNotice(string phone, string content, int sendType = 6)
         {
@@ -131,16 +134,16 @@ namespace ZR.ServiceCore.Services
             // 后台线程不能复用请求级 Context：调用方可能正处于 UseTran 事务中（如批量取消订单），
             // 同一连接并发执行命令会抛 "已有打开的与此 Connection 相关联的 DataReader，必须首先将它关闭"，
             // 并把外层事务一起带崩。与 WfFlowInstanceService.FillAttachmentParsedAsync 一致：
-            // 请求上下文内先捕获租户 Id，任务内用 CopyNew() 独立连接并按租户路由。
-            var tenantId = App.IsTenantEnabled() ? App.GetCurrentTenantId() : null;
+            // 请求上下文内先捕获租户 Id，任务内用 BackgroundDbHelper 建独立连接并按租户路由。
+            var tenantId = BackgroundDbHelper.CaptureTenantId();
             _ = System.Threading.Tasks.Task.Run(async () =>
             {
-                var scope = global::SqlSugar.IOC.DbScoped.SugarScope.CopyNew();
-                ISqlSugarClient db = App.IsTenantEnabled() && !string.IsNullOrWhiteSpace(tenantId)
-                    ? scope.AsTenant().GetConnectionScope(tenantId)
-                    : scope;
+                ISqlSugarClient db = null;
                 try
                 {
+                    // 后台线程用独立连接，不复用请求级 scoped Context（避免连接占用冲突）
+                    db = BackgroundDbHelper.CreateBackgroundDb(tenantId);
+
                     var result = await _smsSender.SendAsync(message);
                     WriteBackSendResult(model, result, db);
                 }
@@ -149,7 +152,11 @@ namespace ZR.ServiceCore.Services
                     logger.Error(ex, $"通知短信异步发送异常，Id={model.Id}，手机号={message.PhoneNum}");
                     try
                     {
-                        WriteBackSendResult(model, SmsSendResult.Fail("EXCEPTION", ex.Message), db);
+                        // db 为 null 时（连接创建失败）不回写，避免退回请求级 scoped Context
+                        if (db != null)
+                        {
+                            WriteBackSendResult(model, SmsSendResult.Fail("EXCEPTION", ex.Message), db);
+                        }
                     }
                     catch { /* 回写失败仅记日志 */ }
                 }

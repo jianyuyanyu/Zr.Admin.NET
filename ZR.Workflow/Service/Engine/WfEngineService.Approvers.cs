@@ -393,13 +393,17 @@ namespace ZR.Workflow.Service
             if (action != (int)WfAction.Submit && action != (int)WfAction.Cc && action != (int)WfAction.AutoSkip)
             {
                 var nodeName = GetNodeNameSafe(nodeId);
-                var tenantId = global::Infrastructure.App.GetCurrentTenantId();
+                var tenantId = BackgroundDbHelper.CaptureTenantId();
                 _ = GenerateRecordSummaryAsync(record.RecordId, instanceId, nodeName, opinion, tenantId, op.UserId, op.UserName);
             }
         }
 
         /// <summary>
-        /// 异步生成审批记录 AI 摘要并写回（fire-and-forget，异常吞掉不影响主流程）
+        /// 异步生成审批记录 AI 摘要并写回（fire-and-forget，异常吞掉不影响主流程）。
+        /// 注意：本方法在 <see cref="RunInTx"/> 事务内被调用，后台任务不能复用请求级 scoped <c>Context</c>——
+        /// 复用会与主流程共用同一 MySqlConnection 并发执行 SQL，抛 "This MySqlConnection is already in use"；
+        /// 且请求结束后 scoped 连接释放、租户上下文丢失。参照 FillAttachmentParsedAsync 的做法：
+        /// 请求上下文内先捕获租户 Id，任务内用 CopyNew() 独立连接并按租户路由。
         /// </summary>
         private async Task GenerateRecordSummaryAsync(
             long recordId, long instanceId, string nodeName, string opinion,
@@ -412,12 +416,9 @@ namespace ZR.Workflow.Service
                 // 请求线程持有同一连接的打开状态，并发使用同一连接会抛
                 // "已有打开的与此 Connection 相关联的 DataReader，必须首先将它关闭"，
                 // 并把外层事务提交一起带崩（表现为 500）。
-                // 与 WfFlowInstanceService.FillAttachmentParsedAsync 保持一致：
-                // 复制一个独立连接的 scope，并按租户路由到对应租户库。
-                var scope = SqlSugar.IOC.DbScoped.SugarScope.CopyNew();
-                ISqlSugarClient db = App.IsTenantEnabled() && !string.IsNullOrWhiteSpace(tenantId)
-                    ? scope.AsTenant().GetConnectionScope(tenantId)
-                    : scope;
+                // 与 WfFlowInstanceService.FillAttachmentParsedAsync 一致：统一用 BackgroundDbHelper
+                // 建独立连接（CopyNew）并按租户路由到对应租户库。
+                var db = BackgroundDbHelper.CreateBackgroundDb(tenantId);
 
                 var inst = await db.Queryable<WfFlowInstance>()
                     .Where(i => i.InstanceId == instanceId)

@@ -613,21 +613,19 @@ namespace ZR.Workflow.Service
         /// 提交后异步填充实例的 AttachmentParsed（附件解析结果）。
         /// 解析失败不影响流程，仅记日志；审批侧读取为空时自动降级实时抽取以兼容历史实例。
         /// 注意：后台线程不能复用请求级 scoped <c>Context</c>（请求结束后连接释放、租户上下文丢失），
-        /// 须在请求内先捕获租户 Id，任务内用 <see cref="SqlSugar.IOC.DbScoped.SugarScope"/>.CopyNew() 独立连接并按租户路由。
+        /// 须在请求内先捕获租户 Id（<see cref="BackgroundDbHelper.CaptureTenantId"/>），
+        /// 任务内用 <see cref="BackgroundDbHelper.CreateBackgroundDb"/> 建独立连接并按租户路由。
         /// </summary>
         private void FillAttachmentParsedAsync(long instanceId, long flowId, string formContent)
         {
             if (string.IsNullOrWhiteSpace(formContent)) return;
             // 请求上下文内捕获租户 Id，供后台线程路由到正确租户库
-            var tenantId = App.IsTenantEnabled() ? App.GetCurrentTenantId() : null;
+            var tenantId = BackgroundDbHelper.CaptureTenantId();
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    var scope = SqlSugar.IOC.DbScoped.SugarScope.CopyNew();
-                    ISqlSugarClient db = App.IsTenantEnabled() && !string.IsNullOrWhiteSpace(tenantId)
-                        ? scope.AsTenant().GetConnectionScope(tenantId)
-                        : scope;
+                    ISqlSugarClient db = BackgroundDbHelper.CreateBackgroundDb(tenantId);
 
                     var formItems = await db.Queryable<WfFlowDefinition>()
                         .Where(d => d.FlowId == flowId)

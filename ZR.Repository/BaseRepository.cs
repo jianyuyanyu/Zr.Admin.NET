@@ -384,6 +384,38 @@ namespace ZR.Repository
     }
 
     /// <summary>
+    /// 后台/fire-and-forget 任务数据库连接辅助。
+    /// 约定：后台线程禁止复用请求级 scoped Context（请求结束后连接释放、租户上下文丢失，
+    /// 与主事务共用同一连接会报 "This MySqlConnection is already in use"）。
+    /// 用法：请求线程内 <see cref="CaptureTenantId"/> 捕获租户 Id，后台任务内 <see cref="CreateBackgroundDb"/> 建独立连接。
+    /// </summary>
+    public static class BackgroundDbHelper
+    {
+        /// <summary>
+        /// 请求上下文内捕获当前租户 Id（未启用多租户返回 null）。
+        /// 必须在请求线程内调用，结果作为闭包传给后台任务。
+        /// </summary>
+        public static string CaptureTenantId()
+        {
+            return App.IsTenantEnabled() ? App.GetCurrentTenantId() : null;
+        }
+
+        /// <summary>
+        /// 后台线程内创建独立数据库连接（CopyNew），多租户时按捕获的租户 Id 路由到对应租户库。
+        /// 必须与 <see cref="CaptureTenantId"/> 配对使用，在后台任务内调用。
+        /// 注意：多租户 CopyNew 后官方要求用 GetConnection（而非 GetConnectionScope），见 SqlSugar 文档"偶发性错误"章节（版本 ≥ 5.1.4.106）。
+        /// 该连接不参与调用方请求/事务上下文，仅用于后台独立任务（fire-and-forget 写回、Job 等）。
+        /// </summary>
+        public static ISqlSugarClient CreateBackgroundDb(string tenantId)
+        {
+            var scope = DbScoped.SugarScope.CopyNew();
+            return App.IsTenantEnabled() && !string.IsNullOrWhiteSpace(tenantId)
+                ? scope.AsTenant().GetConnection(tenantId)
+                : scope;
+        }
+    }
+
+    /// <summary>
     /// 分页查询扩展
     /// </summary>
     public static class QueryableExtension
