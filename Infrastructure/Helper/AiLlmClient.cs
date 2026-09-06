@@ -49,23 +49,23 @@ namespace Infrastructure.Helper
         /// 发起一次非流式对话，返回模型文本回复。timeout 由 options.TimeoutSeconds 控制。
         /// 优先从 Providers 数组匹配当前 Provider 取配置，空字段回退顶层与硬编码默认值。
         /// </summary>
-        public static async Task<string> ChatAsync(AiOptions options, string systemPrompt, string userPrompt)
+        public static async Task<string> ChatAsync(AiOptions options, string systemPrompt, string userPrompt, string scene = null)
         {
             var messages = new[]
             {
                 new { role = "system", content = systemPrompt },
                 new { role = "user", content = userPrompt }
             };
-            return await ChatCoreAsync(options, messages).ConfigureAwait(false);
+            return await ChatCoreAsync(options, messages, scene: scene).ConfigureAwait(false);
         }
 
         /// <summary>
         /// 多轮对话重载：直接传入完整 messages 数组（含 system / user / assistant 历史），
         /// 用于校验失败后的纠错重试（self-correction）等需要回灌上下文的场景。
         /// </summary>
-        public static async Task<string> ChatWithMessagesAsync(AiOptions options, object[] messages)
+        public static async Task<string> ChatWithMessagesAsync(AiOptions options, object[] messages, string scene = null)
         {
-            return await ChatCoreAsync(options, messages).ConfigureAwait(false);
+            return await ChatCoreAsync(options, messages, scene: scene).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -74,7 +74,8 @@ namespace Infrastructure.Helper
         /// resolvedOverride 非空时（多模态场景）覆盖 model/baseUrl/endpoint，实现文本与视觉模型解耦。
         /// </summary>
         private static async Task<string> ChatCoreAsync(AiOptions options, object messages,
-            (string Provider, string BaseUrl, string ChatEndpoint, string Model, string ApiKey)? resolvedOverride = null)
+            (string Provider, string BaseUrl, string ChatEndpoint, string Model, string ApiKey)? resolvedOverride = null,
+            string scene = null)
         {
             var resolved = resolvedOverride ?? ResolveProvider(options);
             var uri = BuildRequestUriWith(options, resolved);
@@ -115,7 +116,7 @@ namespace Infrastructure.Helper
                 using var doc = JsonDocument.Parse(responseText);
                 EnsureNoProviderError(responseText, doc.RootElement);
                 var content = ReadContent(doc.RootElement);
-                LogUsage(doc.RootElement, resolved.Provider, resolved.Model);
+                LogUsage(doc.RootElement, resolved.Provider, resolved.Model, scene);
                 return content;
             }
             catch (JsonException ex)
@@ -162,7 +163,7 @@ namespace Infrastructure.Helper
         /// 从 OpenAI 兼容响应读取 usage 并日志打印 token 输入/输出/合计。
         /// 部分 Provider 可能不返回 usage，缺字段时按 0 打印，不抛异常。
         /// </summary>
-        private static void LogUsage(JsonElement root, string provider, string model)
+        private static void LogUsage(JsonElement root, string provider, string model, string scene = null)
         {
             try
             {
@@ -180,12 +181,38 @@ namespace Infrastructure.Helper
                 if (completionTokens == 0) completionTokens = ReadUsage(root, "completion_tokens");
 
                 var totalTokens = ReadUsage(root, "total_tokens");
-                Logger.LogInformation("AI token usage [provider={Provider}, model={Model}] 输入(prompt)={PromptTokens} 输出(completion)={CompletionTokens} 合计(total)={TotalTokens}",
-                    provider, model, promptTokens, completionTokens, totalTokens);
+                Logger.LogInformation("AI token usage [provider={Provider}, model={Model}, scene={Scene}] 输入(prompt)={PromptTokens} 输出(completion)={CompletionTokens} 合计(total)={TotalTokens}",
+                    provider, model, scene, promptTokens, completionTokens, totalTokens);
+                ReportUsage(scene, provider, model, promptTokens, completionTokens, totalTokens);
             }
             catch (Exception ex)
             {
                 Logger.LogWarning(ex, "读取 AI token 用量失败");
+            }
+        }
+
+        /// <summary>
+        /// token 用量上报：宿主注册 IAiUsageRecorder（写入 ai_call_log 审计流水）时执行；
+        /// 未注册或写库失败仅告警，不阻断对话主链路。
+        /// </summary>
+        private static void ReportUsage(string scene, string provider, string model,
+            int promptTokens, int completionTokens, int totalTokens)
+        {
+            try
+            {
+                App.GetService<IAiUsageRecorder>()?.Record(new AiUsageInfo
+                {
+                    Scene = scene,
+                    Provider = provider,
+                    Model = model,
+                    PromptTokens = promptTokens,
+                    CompletionTokens = completionTokens,
+                    TotalTokens = totalTokens
+                });
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "AI token 用量入库上报失败");
             }
         }
 
@@ -245,7 +272,7 @@ namespace Infrastructure.Helper
         /// 多模态对话：把文本提示与一组图片 URL 一并发送给支持视觉的模型（如 gpt-4o-mini）。
         /// 图片 URL 须为完整 http(s) 地址（由调用方确保已下载可达）。VisionModel 为空时抛友好异常。
         /// </summary>
-        public static async Task<string> ChatWithImagesAsync(AiOptions options, string systemPrompt, string textPrompt, List<string> imageUrls)
+        public static async Task<string> ChatWithImagesAsync(AiOptions options, string systemPrompt, string textPrompt, List<string> imageUrls, string scene = null)
         {
             var resolved = ResolveVisionProvider(options);
             if (string.IsNullOrWhiteSpace(resolved.Model))
@@ -268,7 +295,7 @@ namespace Infrastructure.Helper
                 new { role = "system", content = (object)systemPrompt },
                 new { role = "user", content = (object)content }
             };
-            return await ChatCoreAsync(options, messages, resolved).ConfigureAwait(false);
+            return await ChatCoreAsync(options, messages, resolved, scene).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -303,7 +330,7 @@ namespace Infrastructure.Helper
         /// tools 为 function 描述数组；模型可请求调用，返回 ToolCalls 后由调用方执行回灌。
         /// 本方法不自动回灌，仅完成单次 HTTP 请求与解析，便于上层控制纠错循环轮次。
         /// </summary>
-        public static async Task<ChatToolResult> ChatWithToolsAsync(AiOptions options, object[] messages, object[] tools)
+        public static async Task<ChatToolResult> ChatWithToolsAsync(AiOptions options, object[] messages, object[] tools, string scene = null)
         {
             var resolved = ResolveProvider(options);
             var uri = BuildRequestUri(options);
@@ -347,7 +374,7 @@ namespace Infrastructure.Helper
                 using var doc = JsonDocument.Parse(responseText);
                 EnsureNoProviderError(responseText, doc.RootElement);
                 var result = ReadToolResult(doc.RootElement);
-                LogUsage(doc.RootElement, resolved.Provider, resolved.Model);
+                LogUsage(doc.RootElement, resolved.Provider, resolved.Model, scene);
 
                 // 模型返回成功但无正文也无工具调用：通常是响应结构异常或网关拦截。
                 // 详情（含截断的原始响应）只写后端日志便于排查，不抛给上层——上层会把异常消息透传前端。

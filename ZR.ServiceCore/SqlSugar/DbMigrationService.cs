@@ -68,6 +68,7 @@ namespace ZR.ServiceCore.SqlSugar
             typeof(UserOnlineLog),
             typeof(AiChatMessage),
             typeof(AiChatSession),
+            typeof(AiCallLog),
         };
 
         /// <summary>

@@ -61,12 +61,12 @@ namespace Infrastructure.Helper
         /// <summary>
         /// 调用大模型并把网络类异常转成用户可读提示。仅用于单次问答型能力。
         /// </summary>
-        public static async Task<string> ChatSafeAsync(string system, string user)
+        public static async Task<string> ChatSafeAsync(string system, string user, string scene = null)
         {
             var options = EnsureAiEnabled();
             try
             {
-                return await AiLlmClient.ChatAsync(options, system, user).ConfigureAwait(false);
+                return await AiLlmClient.ChatAsync(options, system, user, scene).ConfigureAwait(false);
             }
             catch (HttpRequestException ex)
             {

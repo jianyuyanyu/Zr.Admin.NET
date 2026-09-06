@@ -222,7 +222,7 @@ namespace ZR.ServiceCore.Services
                 AiLlmClient.ChatToolResult turn;
                 try
                 {
-                    turn = await AiLlmClient.ChatWithToolsAsync(options, messages.ToArray(), tools);
+                    turn = await AiLlmClient.ChatWithToolsAsync(options, messages.ToArray(), tools, "ai_chat");
                 }
                 catch (Exception ex)
                 {
