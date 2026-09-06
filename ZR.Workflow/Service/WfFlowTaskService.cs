@@ -8,17 +8,22 @@ namespace ZR.Workflow.Service
     {
         public PagedInfo<WfFlowTaskDto> GetTodoList(WfFlowTaskQueryDto parm, long userId)
         {
-            return GetTaskList(parm, userId, (int)WfTaskStatus.Pending);
+            return GetTaskList(parm, userId, (int)WfTaskStatus.Pending).ToPage(parm);
+        }
+
+        public Task<PagedInfo<WfFlowTaskDto>> GetTodoListAsync(WfFlowTaskQueryDto parm, long userId)
+        {
+            return GetTaskList(parm, userId, (int)WfTaskStatus.Pending).ToPageAsync(parm);
         }
 
         public PagedInfo<WfFlowTaskDto> GetDoneList(WfFlowTaskQueryDto parm, long userId)
         {
-            return GetTaskList(parm, userId, (int)WfTaskStatus.Done);
+            return GetTaskList(parm, userId, (int)WfTaskStatus.Done).ToPage(parm);
         }
 
-        private PagedInfo<WfFlowTaskDto> GetTaskList(WfFlowTaskQueryDto parm, long userId, int status)
+        private ISugarQueryable<WfFlowTaskDto> GetTaskList(WfFlowTaskQueryDto parm, long userId, int status)
         {
-            var query = Queryable()
+            return Queryable()
                 .InnerJoin<WfFlowInstance>((t, i) => t.InstanceId == i.InstanceId)
                 .LeftJoin<WfFlowDefinition>((t, i, d) => i.FlowId == d.FlowId)
                 .Where((t, i, d) => (t.AssigneeId == userId || t.DelegateId == userId) && t.Status == status)
@@ -46,7 +51,6 @@ namespace ZR.Workflow.Service
                     FlowName = SqlFunc.IsNull(i.FlowName, d.FlowName),
                     InstanceStatus = i.Status
                 });
-            return query.ToPage(parm);
         }
 
         /// <summary>

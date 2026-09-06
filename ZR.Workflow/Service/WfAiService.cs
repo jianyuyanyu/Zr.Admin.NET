@@ -39,24 +39,6 @@ namespace ZR.Workflow.Service
             PropertyNameCaseInsensitive = true
         };
 
-        // 提示词加载器：从磁盘 Prompts 目录读取 .md（目录可经 AiOptions.PromptDir 配置）。
-        // 文件缺失不抛异常、不阻断编译，仅在对应能力调用时通过 GetPromptOrThrow 抛友好提示。
-        private static readonly PromptLoader PromptLoader =
-            new(AppSettings.Get<AiOptions>("AiOptions")?.PromptDir);
-
-        /// <summary>
-        /// 读取提示词，缺失时抛出友好异常（含文件名与目录，便于运维补文件）。
-        /// </summary>
-        private static string GetPromptOrThrow(string fileName, string capability)
-        {
-            var text = PromptLoader.Load(fileName);
-            if (string.IsNullOrWhiteSpace(text))
-            {
-                throw new Exception($"AI 能力「{capability}」所需提示词文件缺失：{fileName}（请检查 AiOptions:PromptDir 指向的 Prompts 目录）");
-            }
-            return text;
-        }
-
         /// <summary>
         /// 构建 validateWorkflow 工具的 function schema（OpenAI 兼容）。
         /// </summary>
@@ -163,13 +145,13 @@ namespace ZR.Workflow.Service
                 throw new Exception("流程描述不能为空");
             }
 
-            var options = EnsureAiEnabled();
+            var options = AiHelper.EnsureAiEnabled();
             var description = input.Description.Trim();
 
             // 消息数组（由本服务持有维护）：system + user + 后续的 assistant(tool_calls) / tool 回灌
             var messages = new List<object>
             {
-                new { role = "system", content = GetPromptOrThrow("flow-generate.md", "流程生成") },
+                new { role = "system", content = AiHelper.GetPromptOrThrow("flow-generate.md", "流程生成") },
                 new { role = "user", content = description }
             };
             var tools = new object[] { ValidateToolSchema };
@@ -764,44 +746,6 @@ namespace ZR.Workflow.Service
 
         #region AI 扩展能力（审批意见 / 流程体检 / 自然语言填单）
 
-        /// <summary>
-        /// 统一校验 AI 开关与 ApiKey，未启用抛友好异常。供新增扩展能力复用，避免重复判断。
-        /// </summary>
-        private static AiOptions EnsureAiEnabled()
-        {
-            var options = AppSettings.Get<AiOptions>("AiOptions");
-            if (options == null || !options.Enable)
-            {
-                throw new Exception("AI 功能未启用，请在 appsettings.json 配置 AiOptions");
-            }
-            var resolved = AiLlmClient.ResolveProvider(options);
-            if (string.IsNullOrWhiteSpace(resolved.ApiKey))
-            {
-                throw new Exception("AI 功能未配置 ApiKey，请在 appsettings.json 的 AiOptions 或 Providers 中配置");
-            }
-            return options;
-        }
-
-        /// <summary>
-        /// 调用大模型并包裹常见网络异常为友好提示。仅用于单次问答型能力。
-        /// </summary>
-        private async Task<string> ChatSafeAsync(string system, string user)
-        {
-            var options = EnsureAiEnabled();
-            try
-            {
-                return await AiLlmClient.ChatAsync(options, system, user).ConfigureAwait(false);
-            }
-            catch (HttpRequestException ex)
-            {
-                throw new Exception("调用 AI 服务失败：" + ex.Message);
-            }
-            catch (TaskCanceledException)
-            {
-                throw new Exception("调用 AI 服务超时，请稍后重试");
-            }
-        }
-
         // ===== 提交前审批意见话术建议（提示词见 Prompts/approval-suggest.md） =====
 
         public async Task<WfAiApprovalSuggestResult> SuggestApprovalAsync(WfAiApprovalSuggestInput input)
@@ -858,17 +802,17 @@ namespace ZR.Workflow.Service
 
             var user = $"审批节点：{input.NodeName}\n表单内容：{formText}{draft}";
 
-            var options = EnsureAiEnabled();
+            var options = AiHelper.EnsureAiEnabled();
             string text;
             if (imgUrls.Count > 0)
             {
                 // 含图片附件：走视觉模型多模态理解（VisionModel 未配置时此方法内部抛友好提示）
                 text = await AiLlmClient.ChatWithImagesAsync(
-                    options, GetPromptOrThrow("approval-suggest.md", "审批意见建议"), user, imgUrls).ConfigureAwait(false);
+                    options, AiHelper.GetPromptOrThrow("approval-suggest.md", "审批意见建议"), user, imgUrls).ConfigureAwait(false);
             }
             else
             {
-                text = await ChatSafeAsync(GetPromptOrThrow("approval-suggest.md", "审批意见建议"), user).ConfigureAwait(false);
+                text = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("approval-suggest.md", "审批意见建议"), user).ConfigureAwait(false);
             }
             if (string.IsNullOrWhiteSpace(text))
             {
@@ -885,7 +829,7 @@ namespace ZR.Workflow.Service
             var op = string.IsNullOrWhiteSpace(opinion) ? "（未填写意见）" : opinion;
             var user = $"审批动作：{action}\n审批节点：{nodeName}\n审批意见：{op}\n表单内容：{formText}";
 
-            var text = await ChatSafeAsync(GetPromptOrThrow("flow-review.md", "审批记录摘要"), user).ConfigureAwait(false);
+            var text = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("flow-review.md", "审批记录摘要"), user).ConfigureAwait(false);
             return new WfAiApprovalSummaryResult { Summary = JsonHelper.StripMarkdown(text).Trim() };
         }
 
@@ -919,7 +863,7 @@ namespace ZR.Workflow.Service
             var linksDesc = string.Join("\n", (def.NodeLinks ?? new List<WfNodeLinkDto>()).Select(l => $"- 连线：{NodeLabel(l.SourceNodeId)} → {NodeLabel(l.TargetNodeId)}（条件：{l.ConditionJson ?? "无"}）"));
             var user = $"流程名称：{def.FlowName}\n表单字段（JSON）：{formDesc}\n节点列表：\n{nodesDesc}\n连线列表：\n{linksDesc}";
 
-            var text = await ChatSafeAsync(GetPromptOrThrow("flow-optimize.md", "流程优化体检"), user).ConfigureAwait(false);
+            var text = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("flow-optimize.md", "流程优化体检"), user).ConfigureAwait(false);
             return ParseAnalyzeResult(text);
         }
 
@@ -1024,7 +968,7 @@ namespace ZR.Workflow.Service
 
             var user = $"可选流程清单：\n{catalog}\n\n用户描述：{input.Description}";
 
-            var text = await ChatSafeAsync(GetPromptOrThrow("intent-match.md", "自然语言填单"), user).ConfigureAwait(false);
+            var text = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("intent-match.md", "自然语言填单"), user).ConfigureAwait(false);
             return ParseMatchFillResult(text, candidates);
         }
 
@@ -1119,10 +1063,10 @@ namespace ZR.Workflow.Service
                 throw new Exception("审批链上下文不能为空");
             }
 
-            var options = EnsureAiEnabled();
+            var options = AiHelper.EnsureAiEnabled();
             var messages = new List<object>
             {
-                new { role = "system", content = GetPromptOrThrow("flow-summary.md", "审批链汇总") },
+                new { role = "system", content = AiHelper.GetPromptOrThrow("flow-summary.md", "审批链汇总") },
                 new { role = "user", content = userContext }
             };
             var tools = new object[] { InstanceSummaryToolSchema };
@@ -1317,13 +1261,13 @@ namespace ZR.Workflow.Service
             string text;
             if (imgUrls.Count > 0)
             {
-                var options = EnsureAiEnabled();
+                var options = AiHelper.EnsureAiEnabled();
                 text = await AiLlmClient.ChatWithImagesAsync(
-                    options, GetPromptOrThrow("risk-check.md", "审批风险预判"), userContext, imgUrls).ConfigureAwait(false);
+                    options, AiHelper.GetPromptOrThrow("risk-check.md", "审批风险预判"), userContext, imgUrls).ConfigureAwait(false);
             }
             else
             {
-                text = await ChatSafeAsync(GetPromptOrThrow("risk-check.md", "审批风险预判"), userContext).ConfigureAwait(false);
+                text = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("risk-check.md", "审批风险预判"), userContext).ConfigureAwait(false);
             }
             if (string.IsNullOrWhiteSpace(text))
             {
