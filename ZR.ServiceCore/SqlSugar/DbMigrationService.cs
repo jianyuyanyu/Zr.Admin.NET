@@ -2,6 +2,7 @@ using Infrastructure;
 using SqlSugar.IOC;
 using System.Reflection;
 using ZR.Model;
+using ZR.Model.AI;
 using ZR.Model.Content;
 using ZR.Model.Models;
 using ZR.Model.Public;
@@ -65,6 +66,8 @@ namespace ZR.ServiceCore.SqlSugar
             typeof(SysFileGroup),
             typeof(DailySchedule),
             typeof(UserOnlineLog),
+            typeof(AiChatMessage),
+            typeof(AiChatSession),
         };
 
         /// <summary>

@@ -338,7 +338,8 @@ namespace Infrastructure.Helper
 
             if (string.IsNullOrWhiteSpace(responseText))
             {
-                return new ChatToolResult();
+                Logger.LogError("AI 服务返回空响应（HTTP 200 但无 body）。uri={Uri}, model={Model}", uri, resolved.Model);
+                throw new HttpRequestException("AI 服务返回空响应，请稍后重试或联系管理员");
             }
 
             try
@@ -347,6 +348,15 @@ namespace Infrastructure.Helper
                 EnsureNoProviderError(responseText, doc.RootElement);
                 var result = ReadToolResult(doc.RootElement);
                 LogUsage(doc.RootElement, resolved.Provider, resolved.Model);
+
+                // 模型返回成功但无正文也无工具调用：通常是响应结构异常或网关拦截。
+                // 详情（含截断的原始响应）只写后端日志便于排查，不抛给上层——上层会把异常消息透传前端。
+                if (string.IsNullOrWhiteSpace(result.Content) && (result.ToolCalls == null || result.ToolCalls.Count == 0))
+                {
+                    Logger.LogError("AI 服务响应无可用内容（无 content 且无 tool_calls）。原始响应={Response}, uri={Uri}, model={Model}",
+                        TruncateForLog(responseText, 600), uri, resolved.Model);
+                    throw new HttpRequestException("AI 服务返回了无法解析的响应，请稍后重试或联系管理员");
+                }
                 return result;
             }
             catch (JsonException ex)
@@ -355,6 +365,12 @@ namespace Infrastructure.Helper
                 Logger.LogWarning(ex, "解析 AI tool 响应失败，按纯文本处理");
                 return new ChatToolResult { Content = responseText };
             }
+        }
+
+        private static string TruncateForLog(string text, int maxLen)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return string.Empty;
+            return text.Length <= maxLen ? text : text.Substring(0, maxLen) + "…(截断)";
         }
 
         /// <summary>
@@ -505,7 +521,7 @@ namespace Infrastructure.Helper
 
             var message = TryReadProviderErrorMessage(responseText);
             Logger.LogError("AI 服务返回错误响应：{Message}", message);
-            throw new HttpRequestException(string.IsNullOrWhiteSpace(message) ? "AI 服务返回错误响应" : message);
+            throw new HttpRequestException("AI 服务调用失败，请稍后重试或检查 AI 配置");
         }
 
         /// <summary>

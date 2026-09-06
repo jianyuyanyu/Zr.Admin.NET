@@ -267,9 +267,11 @@ namespace Infrastructure.Model
         public string BaseUrl { get; set; }
 
         /// <summary>
-        /// 聊天接口路径，默认 /v1/chat/completions
+        /// 聊天接口路径，如 /v1/chat/completions。
+        /// 注意：留空才能命中 Providers 分项配置（分项匹配优先级高于顶层默认值），
+        /// 否则 qwen/dashscope 等 BaseUrl 已含 /v1 的提供商会把路径拼成 /v1/v1/chat/completions。
         /// </summary>
-        public string ChatEndpoint { get; set; } = "/v1/chat/completions";
+        public string ChatEndpoint { get; set; }
 
         /// <summary>
         /// 模型名称，如 gpt-4o-mini / deepseek-chat / qwen-turbo

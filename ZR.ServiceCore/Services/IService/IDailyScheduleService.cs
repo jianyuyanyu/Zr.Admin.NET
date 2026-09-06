@@ -60,5 +60,10 @@ namespace ZR.ServiceCore.Services
         /// 按时间范围查询（按当前用户隔离），创建时间、截止时间或完成时间任一落在区间内即命中。
         /// </summary>
         List<DailySchedule> GetByDateRange(long userId, DateTime begin, DateTime end);
+
+        /// <summary>
+        /// 按时间范围查询（异步，供 async 服务链路调用，避免在线程池异步上下文中同步阻塞数据库连接）。
+        /// </summary>
+        Task<List<DailySchedule>> GetByDateRangeAsync(long userId, DateTime begin, DateTime end);
     }
 }

@@ -124,14 +124,23 @@ namespace ZR.ServiceCore.Services
         /// </summary>
         public List<DailySchedule> GetByDateRange(long userId, DateTime begin, DateTime end)
         {
+            return GetByDateRangeQuery(userId, begin, end).ToList();
+        }
+
+        public async Task<List<DailySchedule>> GetByDateRangeAsync(long userId, DateTime begin, DateTime end)
+        {
+            return await GetByDateRangeQuery(userId, begin, end).ToListAsync();
+        }
+
+        private ISugarQueryable<DailySchedule> GetByDateRangeQuery(long userId, DateTime begin, DateTime end)
+        {
             return Queryable()
                 .Where(m => m.UserId == userId)
                 .Where(m =>
                     (m.Create_time >= begin && m.Create_time <= end) ||
                     (m.DueTime >= begin && m.DueTime <= end) ||
                     (m.FinishTime >= begin && m.FinishTime <= end))
-                .OrderBy(m => m.DueTime, OrderByType.Asc)
-                .ToList();
+                .OrderBy(m => m.DueTime, OrderByType.Asc);
         }
 
         /// <summary>

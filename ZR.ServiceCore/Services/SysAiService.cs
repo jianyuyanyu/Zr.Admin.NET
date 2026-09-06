@@ -1,7 +1,5 @@
-using Infrastructure;
 using Infrastructure.Attribute;
 using Infrastructure.Helper;
-using Infrastructure.Model;
 using System.Globalization;
 using System.Text.Json;
 using ZR.Model.Models;
@@ -69,9 +67,6 @@ namespace ZR.ServiceCore.Services
         private readonly IDailyScheduleService _dailyScheduleService;
         private readonly IGenTableColumnService _genTableColumnService;
 
-        private static readonly PromptLoader PromptLoader =
-            new(AppSettings.Get<AiOptions>("AiOptions")?.PromptDir);
-
         public SysAiService(
             ICommonLangService commonLangService,
             IDailyScheduleService dailyScheduleService,
@@ -121,7 +116,7 @@ namespace ZR.ServiceCore.Services
             }
 
             var user = BuildTranslatePrompt(sourceLang, targetLangs, items);
-            var text = await ChatSafeAsync(GetPromptOrThrow("system/lang-translate.md", "多语言翻译"), user).ConfigureAwait(false);
+            var text = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("system/lang-translate.md", "多语言翻译"), user).ConfigureAwait(false);
 
             return ParseTranslateResult(text, sourceLang, targetLangs, items);
         }
@@ -136,7 +131,7 @@ namespace ZR.ServiceCore.Services
             foreach (var entry in entries)
             {
                 if (entry == null || string.IsNullOrWhiteSpace(entry.LangKey)) continue;
-                var langKey = Clip(entry.LangKey.Trim(), 100);
+                var langKey = AiHelper.Truncate(entry.LangKey.Trim(), 100);
 
                 foreach (var t in entry.Translations ?? new List<SysAiLangTranslation>())
                 {
@@ -150,7 +145,7 @@ namespace ZR.ServiceCore.Services
                     {
                         LangKey = langKey,
                         LangCode = langCode,
-                        LangName = Clip(t.LangName.Trim(), 2000),
+                        LangName = AiHelper.Truncate(t.LangName.Trim(), 2000),
                         Addtime = now
                     });
                 }
@@ -185,7 +180,7 @@ namespace ZR.ServiceCore.Services
                 throw new Exception("调度描述过长，请精简到 200 字以内");
             }
 
-            var reply = await ChatSafeAsync(GetPromptOrThrow("system/cron-parse.md", "Cron 表达式生成"), $"调度描述：{text}").ConfigureAwait(false);
+            var reply = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("system/cron-parse.md", "Cron 表达式生成"), $"调度描述：{text}").ConfigureAwait(false);
             return ParseCronResult(reply);
         }
 
@@ -205,7 +200,7 @@ namespace ZR.ServiceCore.Services
             var now = DateTime.Now;
             var user = $"currentTime：{now:yyyy-MM-dd HH:mm}（星期{GetCnWeekday(now.DayOfWeek)}）\nweekStart：1\ntext：{text}";
 
-            var reply = await ChatSafeAsync(GetPromptOrThrow("system/schedule-parse.md", "日程解析"), user).ConfigureAwait(false);
+            var reply = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("system/schedule-parse.md", "日程解析"), user).ConfigureAwait(false);
             return ParseScheduleResult(reply);
         }
 
@@ -241,8 +236,8 @@ namespace ZR.ServiceCore.Services
                 periodEnd = end.ToString("yyyy-MM-dd"),
                 schedules = schedules.Select(x => new
                 {
-                    title = Clip(x.Title, 100),
-                    content = Clip(x.Content ?? string.Empty, 500),
+                    title = AiHelper.Truncate(x.Title, 100),
+                    content = AiHelper.Truncate(x.Content ?? string.Empty, 500),
                     status = x.Status,
                     priority = x.Priority,
                     dueTime = x.DueTime?.ToString("yyyy-MM-dd HH:mm") ?? string.Empty
@@ -255,7 +250,7 @@ namespace ZR.ServiceCore.Services
                 user += $"\n（日程较多，仅提供前 {MaxWeeklyReportItems} 条，汇总时请说明数据已截断）";
             }
 
-            var reply = await ChatSafeAsync(GetPromptOrThrow("system/schedule-weekly-report.md", "周报汇总"), user).ConfigureAwait(false);
+            var reply = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("system/schedule-weekly-report.md", "周报汇总"), user).ConfigureAwait(false);
             var parsed = ParseWeeklyReportResult(reply);
             parsed.PeriodStart = result.PeriodStart;
             parsed.PeriodEnd = result.PeriodEnd;
@@ -287,18 +282,18 @@ namespace ZR.ServiceCore.Services
                 tableName = dbColumns.FirstOrDefault()?.TableName ?? string.Empty,
                 columns = dbColumns.Select(x => new
                 {
-                    columnName = Clip(x.ColumnName.Trim(), 100),
+                    columnName = AiHelper.Truncate(x.ColumnName.Trim(), 100),
                     csharpType = x.CsharpType ?? string.Empty,
                     // GenTableColumn 未单独存长度，只能从 ColumnType（如 nvarchar(500)）里解析
                     length = ParseColumnLength(x.ColumnType),
                     isPk = x.IsPk,
                     isNullable = !x.IsRequired,
-                    comment = Clip(x.ColumnComment ?? string.Empty, 200)
+                    comment = AiHelper.Truncate(x.ColumnComment ?? string.Empty, 200)
                 }).ToList()
             };
 
-            var reply = await ChatSafeAsync(
-                GetPromptOrThrow("system/gencode-columns.md", "代码生成列配置推断"),
+            var reply = await AiHelper.ChatSafeAsync(
+                AiHelper.GetPromptOrThrow("system/gencode-columns.md", "代码生成列配置推断"),
                 System.Text.Json.JsonSerializer.Serialize(payload)).ConfigureAwait(false);
 
             return ParseGenColumnResult(reply, payload.tableName, dbColumns);
@@ -315,8 +310,8 @@ namespace ZR.ServiceCore.Services
                 throw new Exception("聚合指标不能为空");
             }
 
-            var reply = await ChatSafeAsync(
-                GetPromptOrThrow("system/log-login-analysis.md", "登录日志 AI 安全分析"),
+            var reply = await AiHelper.ChatSafeAsync(
+                AiHelper.GetPromptOrThrow("system/log-login-analysis.md", "登录日志 AI 安全分析"),
                 System.Text.Json.JsonSerializer.Serialize(metrics, MetricJsonOptions)).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(reply))
             {
@@ -335,8 +330,8 @@ namespace ZR.ServiceCore.Services
                 throw new Exception("聚合指标不能为空");
             }
 
-            var reply = await ChatSafeAsync(
-                GetPromptOrThrow("system/log-oper-analysis.md", "操作日志 AI 健康分析"),
+            var reply = await AiHelper.ChatSafeAsync(
+                AiHelper.GetPromptOrThrow("system/log-oper-analysis.md", "操作日志 AI 健康分析"),
                 System.Text.Json.JsonSerializer.Serialize(metrics, MetricJsonOptions)).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(reply))
             {
@@ -356,9 +351,9 @@ namespace ZR.ServiceCore.Services
                 targetLangs,
                 items = items.Select(x => new
                 {
-                    langKey = Clip(x.LangKey.Trim(), 100),
-                    text = Clip(x.Text.Trim(), MaxItemTextLength),
-                    context = string.IsNullOrWhiteSpace(x.Context) ? string.Empty : Clip(x.Context.Trim(), 100)
+                    langKey = AiHelper.Truncate(x.LangKey.Trim(), 100),
+                    text = AiHelper.Truncate(x.Text.Trim(), MaxItemTextLength),
+                    context = string.IsNullOrWhiteSpace(x.Context) ? string.Empty : AiHelper.Truncate(x.Context.Trim(), 100)
                 }).ToList()
             };
             return System.Text.Json.JsonSerializer.Serialize(payload);
@@ -803,58 +798,5 @@ namespace ZR.ServiceCore.Services
                 : new string(chars, 0, LangCodeMaxLength);
         }
 
-        private static string Clip(string value, int max)
-        {
-            if (string.IsNullOrEmpty(value)) return value;
-            return value.Length <= max ? value : value.Substring(0, max);
-        }
-
-        private static string GetPromptOrThrow(string fileName, string capability)
-        {
-            var text = PromptLoader.Load(fileName);
-            if (string.IsNullOrWhiteSpace(text))
-            {
-                throw new Exception($"AI 能力「{capability}」所需提示词文件缺失：{fileName}（请检查 AiOptions:PromptDir 指向的 Prompts 目录）");
-            }
-            return text;
-        }
-
-        /// <summary>
-        /// 校验 AI 开关与 ApiKey，未启用时抛友好异常（与工作流 AI 同一口径）。
-        /// </summary>
-        private static AiOptions EnsureAiEnabled()
-        {
-            var options = AppSettings.Get<AiOptions>("AiOptions");
-            if (options == null || !options.Enable)
-            {
-                throw new Exception("AI 功能未启用，请在 appsettings.json 配置 AiOptions");
-            }
-            var resolved = AiLlmClient.ResolveProvider(options);
-            if (string.IsNullOrWhiteSpace(resolved.ApiKey))
-            {
-                throw new Exception("AI 功能未配置 ApiKey，请在 appsettings.json 的 AiOptions 或 Providers 中配置");
-            }
-            return options;
-        }
-
-        /// <summary>
-        /// 调用大模型并把网络类异常转成用户可读提示。
-        /// </summary>
-        private static async Task<string> ChatSafeAsync(string system, string user)
-        {
-            var options = EnsureAiEnabled();
-            try
-            {
-                return await AiLlmClient.ChatAsync(options, system, user).ConfigureAwait(false);
-            }
-            catch (HttpRequestException ex)
-            {
-                throw new Exception("调用 AI 服务失败：" + ex.Message);
-            }
-            catch (TaskCanceledException)
-            {
-                throw new Exception("调用 AI 服务超时，请稍后重试");
-            }
-        }
     }
 }
