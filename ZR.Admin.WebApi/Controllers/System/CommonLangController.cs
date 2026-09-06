@@ -4,6 +4,7 @@ using ZR.Model;
 using ZR.Model.Dto;
 using ZR.Model.Models;
 using ZR.Model.System.Dto;
+using ZR.ServiceCore.AI.IService;
 
 namespace ZR.Admin.WebApi.Controllers
 {

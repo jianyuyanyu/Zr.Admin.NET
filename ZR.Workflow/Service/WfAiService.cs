@@ -1,6 +1,5 @@
-using Infrastructure.Helper;
+using Infrastructure.AI;
 using Microsoft.Extensions.Logging;
-using Newtonsoft.Json;
 using System.Text.Json;
 using ZR.Workflow.Helper;
 using STJson = System.Text.Json;

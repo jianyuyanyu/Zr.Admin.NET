@@ -7,6 +7,7 @@ using ZR.CodeGenerator.Service;
 using ZR.Model;
 using ZR.Model.System.Dto;
 using ZR.Model.System.Generate;
+using ZR.ServiceCore.AI.IService;
 
 namespace ZR.Admin.WebApi.Controllers
 {

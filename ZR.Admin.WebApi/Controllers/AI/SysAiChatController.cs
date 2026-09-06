@@ -1,14 +1,15 @@
 using Microsoft.AspNetCore.Mvc;
 using ZR.Model.AI.Dto;
+using ZR.ServiceCore.AI.IService;
 
-namespace ZR.Admin.WebApi.Controllers.System
+namespace ZR.Admin.WebApi.Controllers.AI
 {
     /// <summary>
     /// 全局 AI 助手（办工助手）：会话管理与工具调用对话。
     /// 权限按登录用户（common），会话/消息/工具数据均按当前登录用户隔离。
     /// </summary>
     [Route("system/aichat")]
-    [ApiExplorerSettings(GroupName = "sys")]
+    [ApiExplorerSettings(GroupName = "ai")]
     public class SysAiChatController : BaseController
     {
         private readonly ISysAiChatService _aiChatService;

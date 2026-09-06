@@ -1,6 +1,6 @@
 using ZR.Model.System.Dto;
 
-namespace ZR.ServiceCore.Services
+namespace ZR.ServiceCore.AI.IService
 {
     /// <summary>
     /// 系统模块 AI 能力：多语言批量翻译、自然语言生成 Cron 表达式。

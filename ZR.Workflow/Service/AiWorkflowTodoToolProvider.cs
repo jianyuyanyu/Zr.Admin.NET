@@ -4,7 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using ZR.Model.AI.Dto;
-using ZR.ServiceCore.Services;
+using ZR.ServiceCore.AI.IService;
 using ZR.Workflow.Model.Dto;
 using ZR.Workflow.Service.IService;
 

@@ -3,7 +3,7 @@ using System;
 using System.Net.Http;
 using System.Threading.Tasks;
 
-namespace Infrastructure.Helper
+namespace Infrastructure.AI
 {
     /// <summary>
     /// AI 能力公共基建，供各模块（系统 AI / 工作流 AI / AI 对话助手）复用：

@@ -2,6 +2,7 @@
 using SqlSugar;
 using ZR.Model.System;
 using ZR.Model.System.Dto;
+using ZR.ServiceCore.AI.IService;
 
 namespace ZR.Admin.WebApi.Controllers.monitor
 {

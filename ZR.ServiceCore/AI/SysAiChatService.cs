@@ -1,13 +1,15 @@
+using Infrastructure.AI;
 using Infrastructure.Attribute;
-using Infrastructure.Helper;
 using Microsoft.IdentityModel.Tokens;
 using Newtonsoft.Json.Linq;
 using NLog;
 using ZR.Model.AI;
 using ZR.Model.AI.Dto;
 using ZR.Model.System.Dto;
+using ZR.ServiceCore.AI.IService;
+using ZR.ServiceCore.Services;
 
-namespace ZR.ServiceCore.Services
+namespace ZR.ServiceCore.AI
 {
     /// <summary>
     /// 全局 AI 助手（办工助手）：
@@ -217,6 +219,7 @@ namespace ZR.ServiceCore.Services
             var tools = BuildToolObjects();
             string reply = "";
             var roundDiag = new List<string>();
+            int totalPromptTokens = 0, totalCompletionTokens = 0, totalTokens = 0;
             for (var round = 0; round < MaxToolRounds; round++)
             {
                 AiLlmClient.ChatToolResult turn;
@@ -230,6 +233,10 @@ namespace ZR.ServiceCore.Services
                     _logger.Error($"AI 模型调用异常 sessionId={session.SessionId} userId={userId} model={model} msg={AiHelper.ClipText(message, 200)} err={ex}");
                     throw;
                 }
+                // 一次对话可能多次调用模型，累计本轮用量便于回填消息级 token
+                totalPromptTokens += turn.PromptTokens;
+                totalCompletionTokens += turn.CompletionTokens;
+                totalTokens += turn.TotalTokens;
                 var contentLen = turn.Content?.Length ?? 0;
                 var toolNames = turn.ToolCalls?.Select(x => x.Name) ?? new List<string>();
                 roundDiag.Add($"r{round + 1}:finish={turn.FinishReason ?? "null"},contentLen={contentLen},tools=[{string.Join(",", toolNames)}]");
@@ -283,7 +290,7 @@ namespace ZR.ServiceCore.Services
 
             // 4. 落库 + 会话元信息维护
             await SaveMessageAsync(session.SessionId, userId, "user", message, model);
-            await SaveMessageAsync(session.SessionId, userId, "assistant", reply, model);
+            await SaveMessageAsync(session.SessionId, userId, "assistant", reply, model, totalPromptTokens, totalCompletionTokens, totalTokens);
 
             var needAutoTitle = session.Title.IsNullOrEmpty() || session.Title == "新对话";
             var newTitle = session.Title;
@@ -304,7 +311,8 @@ namespace ZR.ServiceCore.Services
             };
         }
 
-        private async Task SaveMessageAsync(long sessionId, long userId, string role, string content, string model)
+        private async Task SaveMessageAsync(long sessionId, long userId, string role, string content, string model,
+            int promptTokens = 0, int completionTokens = 0, int totalTokens = 0)
         {
             var msg = new AiChatMessage
             {
@@ -315,6 +323,13 @@ namespace ZR.ServiceCore.Services
                 Content = content ?? "",
                 Model = model
             };
+            // 由 assistant 消息承载本次对话累计 token（一次对话可能多次调用模型），usage 缺失时保持 NULL
+            if (promptTokens > 0 || completionTokens > 0 || totalTokens > 0)
+            {
+                msg.PromptTokens = promptTokens;
+                msg.CompletionTokens = completionTokens;
+                msg.TotalTokens = totalTokens;
+            }
             msg.MessageId = await Context.Insertable(msg).ExecuteReturnSnowflakeIdAsync();
         }
 

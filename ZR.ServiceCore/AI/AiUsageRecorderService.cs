@@ -1,10 +1,11 @@
 using Infrastructure;
+using Infrastructure.AI;
 using Infrastructure.Attribute;
-using Infrastructure.Helper;
 using NLog;
 using ZR.Model.AI;
+using ZR.Repository;
 
-namespace ZR.ServiceCore.Services
+namespace ZR.ServiceCore.AI
 {
     /// <summary>
     /// AI token 用量审计落库：接收 AiLlmClient 统一采集点上报，
@@ -29,7 +30,8 @@ namespace ZR.ServiceCore.Services
                     PromptTokens = usage.PromptTokens,
                     CompletionTokens = usage.CompletionTokens,
                     TotalTokens = usage.TotalTokens,
-                    UserName = App.UserName
+                    UserId = DataScopeExtensions.GetCurrentUserId(),
+                    UserName = App.UserName,
                 }).ExecuteReturnSnowflakeId();
             }
             catch (Exception ex)

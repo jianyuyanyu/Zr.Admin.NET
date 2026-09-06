@@ -2,7 +2,7 @@ using System.Collections.Generic;
 using System.Threading.Tasks;
 using ZR.Model.AI.Dto;
 
-namespace ZR.ServiceCore.Services
+namespace ZR.ServiceCore.AI.IService
 {
     /// <summary>
     /// AI 助手扩展工具提供者。

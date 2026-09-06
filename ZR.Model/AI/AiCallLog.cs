@@ -29,6 +29,9 @@ namespace ZR.Model.AI
         /// <summary>合计 token</summary>
         public int TotalTokens { get; set; }
 
+        /// <summary>触发用户ID（请求登录人；后台任务无登录上下文时为 0）</summary>
+        public long UserId { get; set; }
+
         /// <summary>触发用户（请求登录人；后台任务无登录上下文时为空）</summary>
         [SugarColumn(Length = 64, IsNullable = true)]
         public string UserName { get; set; }

@@ -351,6 +351,7 @@ namespace ZR.ServiceCore.Services
                 result.Add(new MallSeedService().EnsureTasksSeedData());
                 // 依赖 InitMenuData 已写入菜单，须排在其后
                 result.Add(new SystemMenuSeedService().EnsureAiPermSeedData());
+                result.Add(new SystemMenuSeedService().EnsureAiUsageMenuSeedData());
 
                 db.Ado.CommitTran();
             }

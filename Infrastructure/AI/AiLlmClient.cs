@@ -7,7 +7,7 @@ using System.Net.Http;
 using System.Text.Json;
 using System.Threading.Tasks;
 
-namespace Infrastructure.Helper
+namespace Infrastructure.AI
 {
     /// <summary>
     /// 轻量 LLM 客户端：封装 OpenAI 兼容 chat/completions 调用，仅依赖 Infrastructure，
@@ -15,7 +15,7 @@ namespace Infrastructure.Helper
     /// </summary>
     public static class AiLlmClient
     {
-        private static readonly ILogger Logger = LoggerFactory.Create(builder => builder.AddConsole()).CreateLogger("Infrastructure.Helper.AiLlmClient");
+        private static readonly ILogger Logger = LoggerFactory.Create(builder => builder.AddConsole()).CreateLogger("Infrastructure.AI.AiLlmClient");
 
         public static Uri BuildRequestUri(AiOptions options)
         {
@@ -116,7 +116,7 @@ namespace Infrastructure.Helper
                 using var doc = JsonDocument.Parse(responseText);
                 EnsureNoProviderError(responseText, doc.RootElement);
                 var content = ReadContent(doc.RootElement);
-                LogUsage(doc.RootElement, resolved.Provider, resolved.Model, scene);
+                _ = LogUsage(doc.RootElement, resolved.Provider, resolved.Model, scene);
                 return content;
             }
             catch (JsonException ex)
@@ -160,35 +160,47 @@ namespace Infrastructure.Helper
         }
 
         /// <summary>
-        /// 从 OpenAI 兼容响应读取 usage 并日志打印 token 输入/输出/合计。
-        /// 部分 Provider 可能不返回 usage，缺字段时按 0 打印，不抛异常。
+        /// 从 OpenAI 兼容响应读取 usage 并日志打印 token 输入/输出/合计，同时上报宿主落库。
+        /// 返回读取到的 token 三元组，供调用方（如 tools 模式）将本轮用量随结果回传。
+        /// 部分 Provider 可能不返回 usage，缺字段时按 0 处理，不抛异常。
         /// </summary>
-        private static void LogUsage(JsonElement root, string provider, string model, string scene = null)
+        private static (int Prompt, int Completion, int Total) LogUsage(JsonElement root, string provider, string model, string scene = null)
         {
             try
             {
-                // 千问(DashScope)兼容 OpenAI 协议时 usage 字段名为 input_tokens/output_tokens，
-                // 与 OpenAI 标准的 prompt_tokens/completion_tokens 不同；deepseek 等仍用标准字段。
-                var isQwen = string.Equals((provider ?? "").Trim(), "qwen", StringComparison.OrdinalIgnoreCase);
-                var inputKey = isQwen ? "input_tokens" : "prompt_tokens";
-                var outputKey = isQwen ? "output_tokens" : "completion_tokens";
-
-                var promptTokens = ReadUsage(root, inputKey);
-                var completionTokens = ReadUsage(root, outputKey);
-
-                // 若目标字段缺失（如千问网关同时返回两套字段名），回退读取另一套字段名
-                if (promptTokens == 0) promptTokens = ReadUsage(root, "prompt_tokens");
-                if (completionTokens == 0) completionTokens = ReadUsage(root, "completion_tokens");
-
-                var totalTokens = ReadUsage(root, "total_tokens");
+                var (promptTokens, completionTokens, totalTokens) = ReadUsageTokens(root, provider);
                 Logger.LogInformation("AI token usage [provider={Provider}, model={Model}, scene={Scene}] 输入(prompt)={PromptTokens} 输出(completion)={CompletionTokens} 合计(total)={TotalTokens}",
                     provider, model, scene, promptTokens, completionTokens, totalTokens);
                 ReportUsage(scene, provider, model, promptTokens, completionTokens, totalTokens);
+                return (promptTokens, completionTokens, totalTokens);
             }
             catch (Exception ex)
             {
                 Logger.LogWarning(ex, "读取 AI token 用量失败");
+                return (0, 0, 0);
             }
+        }
+
+        /// <summary>
+        /// 读取 usage 节点的 token 计数三元组。
+        /// 千问(DashScope)兼容 OpenAI 协议时 usage 字段名为 input_tokens/output_tokens，
+        /// 与 OpenAI 标准的 prompt_tokens/completion_tokens 不同；deepseek 等仍用标准字段。
+        /// 目标字段缺失时回退读取另一套字段名；仍缺失按 0。
+        /// </summary>
+        private static (int Prompt, int Completion, int Total) ReadUsageTokens(JsonElement root, string provider)
+        {
+            var isQwen = string.Equals((provider ?? "").Trim(), "qwen", StringComparison.OrdinalIgnoreCase);
+            var inputKey = isQwen ? "input_tokens" : "prompt_tokens";
+            var outputKey = isQwen ? "output_tokens" : "completion_tokens";
+
+            var promptTokens = ReadUsage(root, inputKey);
+            var completionTokens = ReadUsage(root, outputKey);
+
+            if (promptTokens == 0) promptTokens = ReadUsage(root, "prompt_tokens");
+            if (completionTokens == 0) completionTokens = ReadUsage(root, "completion_tokens");
+
+            var totalTokens = ReadUsage(root, "total_tokens");
+            return (promptTokens, completionTokens, totalTokens);
         }
 
         /// <summary>
@@ -322,6 +334,15 @@ namespace Infrastructure.Helper
 
             /// <summary>终止原因：stop / tool_calls / length 等</summary>
             public string FinishReason { get; set; }
+
+            /// <summary>本轮调用输入 token（prompt）；usage 缺失时为 0</summary>
+            public int PromptTokens { get; set; }
+
+            /// <summary>本轮调用输出 token（completion）；usage 缺失时为 0</summary>
+            public int CompletionTokens { get; set; }
+
+            /// <summary>本轮调用合计 token；usage 缺失时为 0</summary>
+            public int TotalTokens { get; set; }
         }
 
         /// <summary>
@@ -374,7 +395,10 @@ namespace Infrastructure.Helper
                 using var doc = JsonDocument.Parse(responseText);
                 EnsureNoProviderError(responseText, doc.RootElement);
                 var result = ReadToolResult(doc.RootElement);
-                LogUsage(doc.RootElement, resolved.Provider, resolved.Model, scene);
+                var (prompt, completion, total) = LogUsage(doc.RootElement, resolved.Provider, resolved.Model, scene);
+                result.PromptTokens = prompt;
+                result.CompletionTokens = completion;
+                result.TotalTokens = total;
 
                 // 模型返回成功但无正文也无工具调用：通常是响应结构异常或网关拦截。
                 // 详情（含截断的原始响应）只写后端日志便于排查，不抛给上层——上层会把异常消息透传前端。

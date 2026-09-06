@@ -1,6 +1,6 @@
 using ZR.Model.AI.Dto;
 
-namespace ZR.ServiceCore.Services
+namespace ZR.ServiceCore.AI.IService
 {
     /// <summary>
     /// 全局 AI 助手（办工助手）：会话管理 + 工具调用编排。

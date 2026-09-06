@@ -1,6 +1,6 @@
 using System;
 
-namespace Infrastructure.Helper
+namespace Infrastructure.AI
 {
     /// <summary>
     /// AI 单次模型调用的 token 用量信息（采集点：AiLlmClient 成功响应解析 usage 后）。

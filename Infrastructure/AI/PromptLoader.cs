@@ -6,7 +6,7 @@ using System.Runtime.CompilerServices;
 
 [assembly: InternalsVisibleTo("ZR.Workflow")]
 
-namespace Infrastructure.Helper
+namespace Infrastructure.AI
 {
     /// <summary>
     /// 提示词（Prompt）加载器：从磁盘目录读取 .md 提示词文件，带内存缓存。

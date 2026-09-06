@@ -1,3 +1,4 @@
+using Infrastructure.AI;
 using Infrastructure.Attribute;
 using Infrastructure.Helper;
 using System.Globalization;
@@ -5,8 +6,10 @@ using System.Text.Json;
 using ZR.Model.Models;
 using ZR.Model.System.Dto;
 using ZR.Model.System.Generate;
+using ZR.ServiceCore.AI.IService;
+using ZR.ServiceCore.Services;
 
-namespace ZR.ServiceCore.Services
+namespace ZR.ServiceCore.AI
 {
     /// <summary>
     /// 系统模块 AI 能力：多语言批量翻译、自然语言生成 Cron 表达式。
@@ -58,9 +61,9 @@ namespace ZR.ServiceCore.Services
         };
 
         /// <summary>指标序列化选项：camelCase，让提示词里的字段说明与 JSON 字段名一致</summary>
-        private static readonly System.Text.Json.JsonSerializerOptions MetricJsonOptions = new()
+        private static readonly JsonSerializerOptions MetricJsonOptions = new()
         {
-            PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
         };
 
         private readonly ICommonLangService _commonLangService;
@@ -700,7 +703,7 @@ namespace ZR.ServiceCore.Services
             {
                 var today = DateTime.Today;
                 // DayOfWeek: 周日=0，这里换算成以周一为一周起点的偏移
-                var offset = (int)today.DayOfWeek == 0 ? 6 : (int)today.DayOfWeek - 1;
+                var offset = today.DayOfWeek == 0 ? 6 : (int)today.DayOfWeek - 1;
                 var monday = today.AddDays(-offset);
                 return (monday, monday.AddDays(7).AddSeconds(-1));
             }
