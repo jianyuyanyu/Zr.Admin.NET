@@ -6,6 +6,7 @@ using NLog;
 using ZR.Model.AI;
 using ZR.Model.AI.Dto;
 using ZR.Model.System.Dto;
+using ZR.ServiceCore.AI.Charts;
 using ZR.ServiceCore.AI.IService;
 using ZR.ServiceCore.Services;
 
@@ -31,7 +32,7 @@ namespace ZR.ServiceCore.AI
         /// <summary>回灌历史消息最大条数</summary>
         private const int MaxHistoryMessages = 20;
         /// <summary>单条工具结果回灌给模型的最大长度</summary>
-        private const int ToolResultMaxLen = 4000;
+        private const int ToolResultMaxLen = 8000;
 
         public SysAiChatService(ISysAiService sysAi, IDailyScheduleService scheduleService,
             IEnumerable<IAiAssistantToolProvider> toolProviders)
@@ -152,7 +153,8 @@ namespace ZR.ServiceCore.AI
                 CreateTime = m.CreateTime,
                 PromptTokens = m.PromptTokens,
                 CompletionTokens = m.CompletionTokens,
-                TotalTokens = m.TotalTokens
+                TotalTokens = m.TotalTokens,
+                Charts = m.Role == "assistant" ? AiChartAssembler.FromDataJson(m.DataJson) : null
             }).ToList();
 
             return new SysAiChatDetailDto
@@ -223,6 +225,7 @@ namespace ZR.ServiceCore.AI
             // 3. 工具调用编排
             var tools = BuildToolObjects();
             string reply = "";
+            var chartQueries = new List<AiChartQueryResult>();
             var roundDiag = new List<string>();
             var hasUsage = false;
             int totalPromptTokens = 0, totalCompletionTokens = 0, totalTokens = 0;
@@ -285,6 +288,10 @@ namespace ZR.ServiceCore.AI
                     {
                         content = $"[错误] {content}";
                     }
+                    else if (exec.ChartQuery != null)
+                    {
+                        chartQueries.Add(exec.ChartQuery);
+                    }
                     messages.Add(new { role = "tool", tool_call_id = call.Id, content = AiHelper.ClipText(content, ToolResultMaxLen) });
                 }
             }
@@ -295,21 +302,26 @@ namespace ZR.ServiceCore.AI
                 reply = "抱歉，我这边没有正常生成回答，请重新描述一下你的问题。";
             }
 
+            var assembled = AiChartAssembler.Assemble(reply, chartQueries);
+            reply = assembled.Reply;
+            var charts = assembled.Charts;
+
             // 4. 落库 + 会话元信息维护
             return await FinishTurnAsync(session, isNewSession, userId, message, reply, model,
-                hasUsage, totalPromptTokens, totalCompletionTokens, totalTokens);
+                hasUsage, totalPromptTokens, totalCompletionTokens, totalTokens, charts);
         }
 
         private async Task SaveMessageAsync(long sessionId, long userId, string role, string content, string model,
-            int promptTokens = 0, int completionTokens = 0, int totalTokens = 0)
+            int promptTokens = 0, int completionTokens = 0, int totalTokens = 0, string dataJson = null)
         {
             var msg = new AiChatMessage
             {
                 SessionId = sessionId,
                 UserId = userId,
                 Role = role,
-                MsgType = "text",
+                MsgType = string.IsNullOrWhiteSpace(dataJson) ? "text" : "chart",
                 Content = content ?? "",
+                DataJson = dataJson,
                 Model = model
             };
             // 由 assistant 消息承载本次对话累计 token（一次对话可能多次调用模型），usage 缺失时保持 NULL
@@ -328,10 +340,12 @@ namespace ZR.ServiceCore.AI
         /// </summary>
         private async Task<SysAiChatResultDto> FinishTurnAsync(AiChatSession session, bool isNewSession, long userId,
             string userMessage, string reply, string model,
-            bool hasUsage, int totalPromptTokens, int totalCompletionTokens, int totalTokens)
+            bool hasUsage, int totalPromptTokens, int totalCompletionTokens, int totalTokens,
+            List<AiChartViewDto> charts = null)
         {
             await SaveMessageAsync(session.SessionId, userId, "user", userMessage, model);
-            await SaveMessageAsync(session.SessionId, userId, "assistant", reply, model, totalPromptTokens, totalCompletionTokens, totalTokens);
+            var dataJson = AiChartAssembler.ToDataJson(charts);
+            await SaveMessageAsync(session.SessionId, userId, "assistant", reply, model, totalPromptTokens, totalCompletionTokens, totalTokens, dataJson);
 
             var needAutoTitle = session.Title.IsNullOrEmpty() || session.Title == "新对话";
             var newTitle = session.Title;
@@ -351,7 +365,8 @@ namespace ZR.ServiceCore.AI
                 IsNewSession = isNewSession,
                 PromptTokens = hasUsage ? totalPromptTokens : null,
                 CompletionTokens = hasUsage ? totalCompletionTokens : null,
-                TotalTokens = hasUsage ? totalTokens : null
+                TotalTokens = hasUsage ? totalTokens : null,
+                Charts = charts
             };
         }
 

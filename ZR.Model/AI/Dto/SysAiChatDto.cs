@@ -29,6 +29,8 @@ namespace ZR.Model.AI.Dto
         public int? CompletionTokens { get; set; }
         /// <summary>本消息 token 合计</summary>
         public int? TotalTokens { get; set; }
+        /// <summary>本条助手消息附带的图表（配置+后端数据），用户消息为空</summary>
+        public List<AiChartViewDto> Charts { get; set; }
     }
 
     /// <summary>
@@ -73,6 +75,8 @@ namespace ZR.Model.AI.Dto
         public int? CompletionTokens { get; set; }
         /// <summary>本次对话累计 token 合计</summary>
         public int? TotalTokens { get; set; }
+        /// <summary>本轮助手回复附带的图表（配置+数据），无图时为空</summary>
+        public List<AiChartViewDto> Charts { get; set; }
     }
 
     /// <summary>
@@ -103,6 +107,8 @@ namespace ZR.Model.AI.Dto
     {
         public bool Ok { get; set; }
         public string Content { get; set; }
+
+        public AiChartQueryResult ChartQuery { get; set; }
 
         public static AiToolExecResult Success(string content) => new() { Ok = true, Content = content };
         public static AiToolExecResult Error(string content) => new() { Ok = false, Content = content };
