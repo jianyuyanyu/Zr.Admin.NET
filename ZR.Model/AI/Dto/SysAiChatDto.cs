@@ -23,6 +23,12 @@ namespace ZR.Model.AI.Dto
         public string Role { get; set; }
         public string Content { get; set; }
         public DateTime? CreateTime { get; set; }
+        /// <summary>本消息消耗输入 token（仅 assistant 消息有值；usage 缺失时为 null）</summary>
+        public int? PromptTokens { get; set; }
+        /// <summary>本消息输出 token</summary>
+        public int? CompletionTokens { get; set; }
+        /// <summary>本消息 token 合计</summary>
+        public int? TotalTokens { get; set; }
     }
 
     /// <summary>
@@ -61,6 +67,12 @@ namespace ZR.Model.AI.Dto
         public string Reply { get; set; }
         /// <summary>本次是否新建了会话</summary>
         public bool IsNewSession { get; set; }
+        /// <summary>本次对话累计输入 token（多次工具调用合并；模型未返回 usage 时为 null）</summary>
+        public int? PromptTokens { get; set; }
+        /// <summary>本次对话累计输出 token</summary>
+        public int? CompletionTokens { get; set; }
+        /// <summary>本次对话累计 token 合计</summary>
+        public int? TotalTokens { get; set; }
     }
 
     /// <summary>

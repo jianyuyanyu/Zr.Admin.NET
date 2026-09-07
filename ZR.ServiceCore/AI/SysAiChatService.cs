@@ -144,18 +144,23 @@ namespace ZR.ServiceCore.AI
                 .Where(m => m.SessionId == sessionId && m.UserId == userId)
                 .OrderBy(m => m.CreateTime, OrderByType.Asc)
                 .ToListAsync();
+            var list = msgs.Select(m => new SysAiChatMessageDto
+            {
+                MessageId = m.MessageId,
+                Role = m.Role,
+                Content = m.Content,
+                CreateTime = m.CreateTime,
+                PromptTokens = m.PromptTokens,
+                CompletionTokens = m.CompletionTokens,
+                TotalTokens = m.TotalTokens
+            }).ToList();
+
             return new SysAiChatDetailDto
             {
                 SessionId = session.SessionId,
                 Title = session.Title,
                 Model = session.Model,
-                Messages = msgs.Select(m => new SysAiChatMessageDto
-                {
-                    MessageId = m.MessageId,
-                    Role = m.Role,
-                    Content = m.Content,
-                    CreateTime = m.CreateTime
-                }).ToList()
+                Messages = list
             };
         }
 
@@ -179,6 +184,8 @@ namespace ZR.ServiceCore.AI
                 throw new Exception("消息内容不能为空");
             }
             var options = AiHelper.EnsureAiEnabled();
+            var resolved = AiLlmClient.ResolveProvider(options);
+            var model = string.IsNullOrWhiteSpace(resolved.Model) ? options.Model : resolved.Model;
 
             // 1. 会话归属
             var isNewSession = sessionId <= 0;
@@ -196,8 +203,6 @@ namespace ZR.ServiceCore.AI
             }
 
             // 2. 组装消息（系统提示 + 历史 + 当前提问）
-            var resolved = AiLlmClient.ResolveProvider(options);
-            var model = string.IsNullOrWhiteSpace(resolved.Model) ? options.Model : resolved.Model;
             var messages = new List<object>
             {
                 new { role = "system", content = BuildSystemPrompt(userId) }
@@ -219,6 +224,7 @@ namespace ZR.ServiceCore.AI
             var tools = BuildToolObjects();
             string reply = "";
             var roundDiag = new List<string>();
+            var hasUsage = false;
             int totalPromptTokens = 0, totalCompletionTokens = 0, totalTokens = 0;
             for (var round = 0; round < MaxToolRounds; round++)
             {
@@ -237,6 +243,7 @@ namespace ZR.ServiceCore.AI
                 totalPromptTokens += turn.PromptTokens;
                 totalCompletionTokens += turn.CompletionTokens;
                 totalTokens += turn.TotalTokens;
+                if (totalTokens > 0) hasUsage = true;
                 var contentLen = turn.Content?.Length ?? 0;
                 var toolNames = turn.ToolCalls?.Select(x => x.Name) ?? new List<string>();
                 roundDiag.Add($"r{round + 1}:finish={turn.FinishReason ?? "null"},contentLen={contentLen},tools=[{string.Join(",", toolNames)}]");
@@ -264,7 +271,7 @@ namespace ZR.ServiceCore.AI
                     AiToolExecResult exec;
                     try
                     {
-                        exec = await ExecuteToolAsync(call.Name, call.Arguments, userId);
+                        exec = await ExecuteToolAsync(call.Name, call.Arguments, userId, session.SessionId);
                     }
                     catch (Exception ex)
                     {
@@ -289,26 +296,8 @@ namespace ZR.ServiceCore.AI
             }
 
             // 4. 落库 + 会话元信息维护
-            await SaveMessageAsync(session.SessionId, userId, "user", message, model);
-            await SaveMessageAsync(session.SessionId, userId, "assistant", reply, model, totalPromptTokens, totalCompletionTokens, totalTokens);
-
-            var needAutoTitle = session.Title.IsNullOrEmpty() || session.Title == "新对话";
-            var newTitle = session.Title;
-            if (needAutoTitle)
-            {
-                newTitle = AiHelper.AutoTitle(message);
-            }
-            await UpdateAsync(s => s.SessionId == session.SessionId,
-                s => new AiChatSession { Title = newTitle, UpdateTime = DateTime.Now });
-
-            return new SysAiChatResultDto
-            {
-                SessionId = session.SessionId,
-                Title = newTitle,
-                Model = model,
-                Reply = reply,
-                IsNewSession = isNewSession
-            };
+            return await FinishTurnAsync(session, isNewSession, userId, message, reply, model,
+                hasUsage, totalPromptTokens, totalCompletionTokens, totalTokens);
         }
 
         private async Task SaveMessageAsync(long sessionId, long userId, string role, string content, string model,
@@ -331,6 +320,39 @@ namespace ZR.ServiceCore.AI
                 msg.TotalTokens = totalTokens;
             }
             msg.MessageId = await Context.Insertable(msg).ExecuteReturnSnowflakeIdAsync();
+        }
+
+        /// <summary>
+        /// 落库本轮用户/助手消息并维护会话元信息（标题/更新时间），返回聊天结果。
+        /// token 为 0（模型未返回 usage）时保持 NULL。
+        /// </summary>
+        private async Task<SysAiChatResultDto> FinishTurnAsync(AiChatSession session, bool isNewSession, long userId,
+            string userMessage, string reply, string model,
+            bool hasUsage, int totalPromptTokens, int totalCompletionTokens, int totalTokens)
+        {
+            await SaveMessageAsync(session.SessionId, userId, "user", userMessage, model);
+            await SaveMessageAsync(session.SessionId, userId, "assistant", reply, model, totalPromptTokens, totalCompletionTokens, totalTokens);
+
+            var needAutoTitle = session.Title.IsNullOrEmpty() || session.Title == "新对话";
+            var newTitle = session.Title;
+            if (needAutoTitle)
+            {
+                newTitle = AiHelper.AutoTitle(userMessage);
+            }
+            await UpdateAsync(s => s.SessionId == session.SessionId,
+                s => new AiChatSession { Title = newTitle, UpdateTime = DateTime.Now });
+
+            return new SysAiChatResultDto
+            {
+                SessionId = session.SessionId,
+                Title = newTitle,
+                Model = model,
+                Reply = reply,
+                IsNewSession = isNewSession,
+                PromptTokens = hasUsage ? totalPromptTokens : null,
+                CompletionTokens = hasUsage ? totalCompletionTokens : null,
+                TotalTokens = hasUsage ? totalTokens : null
+            };
         }
 
         #endregion 对话编排
@@ -390,7 +412,6 @@ namespace ZR.ServiceCore.AI
                     required = Array.Empty<string>()
                 }
             });
-
             if (_toolProviders != null)
             {
                 foreach (var provider in _toolProviders)
@@ -412,8 +433,9 @@ namespace ZR.ServiceCore.AI
         /// <param name="toolName">工具名称</param>
         /// <param name="arguments">工具参数</param>
         /// <param name="userId">用户ID</param>
+        /// <param name="sessionId">会话ID</param>
         /// <returns>工具执行结果</returns>
-        private async Task<AiToolExecResult> ExecuteToolAsync(string toolName, string arguments, long userId)
+        private async Task<AiToolExecResult> ExecuteToolAsync(string toolName, string arguments, long userId, long sessionId)
         {
             var args = string.IsNullOrWhiteSpace(arguments) ? new JObject() : JObject.Parse(arguments);
             switch (toolName)
