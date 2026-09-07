@@ -349,9 +349,6 @@ namespace ZR.ServiceCore.Services
                 result.Add(new SystemTaskSeedService().EnsureTenantExpireRemindTaskSeedData());
                 result.Add(new SystemTaskSeedService().EnsureWorkflowTimeoutTaskSeedData());
                 result.Add(new MallSeedService().EnsureTasksSeedData());
-                // 依赖 InitMenuData 已写入菜单，须排在其后
-                result.Add(new SystemMenuSeedService().EnsureAiPermSeedData());
-                result.Add(new SystemMenuSeedService().EnsureAiUsageMenuSeedData());
 
                 db.Ado.CommitTran();
             }
@@ -369,6 +366,12 @@ namespace ZR.ServiceCore.Services
                 var options = App.OptionsSetting;
                 if (options != null)
                 {
+                    if (options.InitPro)
+                    {
+                        // 依赖 InitMenuData 已写入菜单，须排在其后
+                        result.Add(new SystemMenuSeedService().EnsureAiPermSeedData());
+                        result.Add(new SystemMenuSeedService().EnsureAiUsageMenuSeedData());
+                    }
                     if (options.InitMall) result.AddRange(InitMallMenuSeedData());
                     if (options.InitWorkflow) result.AddRange(InitWorkflowMenuSeedData());
                     if (options.InitSaasMenu) result.AddRange(InitSaasMenuSeedData());

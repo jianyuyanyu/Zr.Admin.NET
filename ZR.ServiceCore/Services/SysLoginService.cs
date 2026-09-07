@@ -352,7 +352,130 @@ namespace ZR.ServiceCore.Services
                 metrics.IpMasked = true;
             }
 
+            // 成功侧异地信号：同账号多地点 / 相对近30天新地点 / 2小时内跨地切换
+            BuildRemoteLoginMetrics(db, metrics, begin, end, input.Limit);
+
             return metrics;
+        }
+
+        /// <summary>
+        /// 成功侧异地信号聚合：同账号成功登录多地点、相对近 30 天成功历史出现新地点、2 小时内跨地点切换。
+        /// 地点统一按省-市归一化（忽略运营商与未知段），与登录时的异地提醒同一口径。
+        /// limit：返回条数上限（1-50，默认15）。
+        /// 为避免大范围全量回表，先 SQL 按 账号+地点 粗聚合，内存归并出候选后再对 Top 账号回表做相邻时序检测。
+        /// </summary>
+        private static void BuildRemoteLoginMetrics(ISqlSugarClient db, LoginSecurityMetricsDto metrics, DateTime begin, DateTime end, int? limit)
+        {
+            const int rapidSwitchHours = 2;
+            var maxAccounts = Math.Clamp(limit ?? 15, 1, 50);
+
+            // 区间内成功登录（sys_logininfor.status：0成功），按 账号+地点 聚合
+            var rows = db.Queryable<SysLogininfor>().ApplyScope()
+                .Where(it => it.Status == "0" && it.LoginTime >= begin && it.LoginTime <= end
+                    && it.UserName != null && it.UserName != "" && it.LoginLocation != null && it.LoginLocation != "")
+                .GroupBy(it => new { it.UserName, it.LoginLocation })
+                .Select(it => new
+                {
+                    it.UserName,
+                    it.LoginLocation,
+                    Num = SqlFunc.AggregateCount(it.InfoId),
+                    Last = SqlFunc.AggregateMax(it.LoginTime)
+                })
+                .ToList();
+
+            // 近 30 天成功历史地点集合（账号"新地点"判定基准，不含本次区间）
+            var histRows = db.Queryable<SysLogininfor>().ApplyScope()
+                .Where(it => it.Status == "0" && it.LoginTime >= begin.AddDays(-30) && it.LoginTime < begin
+                    && it.UserName != null && it.UserName != "")
+                .GroupBy(it => new { it.UserName, it.LoginLocation })
+                .Select(it => new { it.UserName, it.LoginLocation })
+                .ToList()
+                .GroupBy(x => x.UserName, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g.Select(x => NormalizeLoginLocation(x.LoginLocation)).Where(x => x.Length > 0)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase),
+                    StringComparer.OrdinalIgnoreCase);
+
+            // 内存归并：每个账号的地点集合与新增地点
+            var candidates = new List<RemoteLoginAccountStat>();
+            foreach (var g in rows.GroupBy(x => x.UserName, StringComparer.OrdinalIgnoreCase))
+            {
+                var locs = g.Select(x => NormalizeLoginLocation(x.LoginLocation))
+                    .Where(x => x.Length > 0)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                histRows.TryGetValue(g.Key, out var hist);
+                var hasHist = hist != null && hist.Count > 0;
+                var newLocs = hasHist
+                    ? locs.Where(x => !hist.Contains(x)).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList()
+                    : new List<string>();
+                if (locs.Count < 2 && newLocs.Count == 0)
+                {
+                    continue; // 无异地信号：单地点且不是相对历史的新地点
+                }
+
+                candidates.Add(new RemoteLoginAccountStat
+                {
+                    UserName = g.Key,
+                    SuccessCount = g.Sum(x => x.Num),
+                    LocationCount = locs.Count,
+                    Locations = string.Join("、", locs.Take(5)),
+                    NewLocationCount = newLocs.Count,
+                    NewLocations = string.Join("、", newLocs.Take(3)),
+                    LastLoginTime = g.Max(x => x.Last)
+                });
+            }
+
+            metrics.RemoteLoginAccountCount = candidates.Count;
+            if (candidates.Count == 0)
+            {
+                return;
+            }
+
+            // 时序检测只对 Top 账号回表：相邻两次成功登录 2 小时内且地点不同记一次跨地切换
+            var top = candidates
+                .OrderByDescending(x => x.LocationCount + x.NewLocationCount)
+                .ThenByDescending(x => x.LastLoginTime)
+                .Take(maxAccounts)
+                .ToList();
+            var names = top.Select(x => x.UserName).ToList();
+            var details = db.Queryable<SysLogininfor>().ApplyScope()
+                .Where(it => it.Status == "0" && it.LoginTime >= begin && it.LoginTime <= end
+                    && names.Contains(it.UserName) && it.LoginLocation != null && it.LoginLocation != "")
+                .OrderBy(it => it.UserName).OrderBy(it => it.LoginTime)
+                .Select(it => new { it.UserName, it.LoginTime, it.LoginLocation })
+                .ToList();
+
+            foreach (var userGroup in details.GroupBy(x => x.UserName, StringComparer.OrdinalIgnoreCase))
+            {
+                long switchCount = 0;
+                string prevLoc = null;
+                DateTime? prevTime = null;
+                foreach (var row in userGroup.OrderBy(x => x.LoginTime))
+                {
+                    var loc = NormalizeLoginLocation(row.LoginLocation);
+                    if (prevLoc != null && prevTime.HasValue
+                        && !string.Equals(loc, prevLoc, StringComparison.OrdinalIgnoreCase)
+                        && (row.LoginTime - prevTime.Value).TotalHours < rapidSwitchHours)
+                    {
+                        switchCount++;
+                    }
+                    if (loc.Length > 0)
+                    {
+                        prevLoc = loc;
+                        prevTime = row.LoginTime;
+                    }
+                    else
+                    {
+                        prevTime = row.LoginTime; // 地点未知行不改变"已知地点"，仅推进时间
+                    }
+                }
+                top.First(x => string.Equals(x.UserName, userGroup.Key, StringComparison.OrdinalIgnoreCase)).RapidSwitchCount = switchCount;
+            }
+
+            metrics.RemoteLoginAccounts = top;
         }
 
         /// <summary>

@@ -31,7 +31,13 @@ namespace Infrastructure.Model
         /// 默认 true，保持与原 data.xlsx 全量种子一致；设为 false 可跳过这些菜单种子写入。
         /// </summary>
         public bool InitSaasMenu { get; set; }
-        /// <summary>数据库迁移配置（自动发现实体、差异检测、迁移历史）</summary>
+        /// <summary>
+        /// 是否初始化Pro种子数据
+        /// </summary>
+        public bool InitPro { get; set; }
+        /// <summary>
+        /// 数据库迁移配置（自动发现实体、差异检测、迁移历史）
+        /// </summary>
         public DbMigrationOptions DbMigration { get; set; } = new();
         public string[] InitTables { get; set; }
         /// <summary>

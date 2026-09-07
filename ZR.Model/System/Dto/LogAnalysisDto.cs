@@ -35,6 +35,12 @@ namespace ZR.Model.System.Dto
             }
             return (begin, end.Date.AddDays(1).AddSeconds(-1));
         }
+
+        /// <summary>
+        /// 异地/新地点成功登录账号返回条数上限，为空默认 15（服务端约束 1-50）。
+        /// 页面默认不传保持 Top15；AI 助手"把异地登录账号全部查出来"类提问可传 50。
+        /// </summary>
+        public int? Limit { get; set; }
     }
 
     /// <summary>
@@ -65,6 +71,12 @@ namespace ZR.Model.System.Dto
 
         /// <summary>IP 是否已脱敏（当前用户无真实 IP 查看权限时为 true，ipaddr 为掩码值）</summary>
         public bool IpMasked { get; set; }
+
+        /// <summary>区间内异地/新地点成功登录的账号数（同账号多地点成功登录，或相对近 30 天成功历史出现新地点）</summary>
+        public long RemoteLoginAccountCount { get; set; }
+
+        /// <summary>异地/新地点成功登录账号明细 Top（含 2 小时内跨地点切换次数）</summary>
+        public List<RemoteLoginAccountStat> RemoteLoginAccounts { get; set; } = new List<RemoteLoginAccountStat>();
 
         /// <summary>按天成功/失败趋势</summary>
         public List<LoginDailyStat> Daily { get; set; } = new List<LoginDailyStat>();
@@ -110,6 +122,37 @@ namespace ZR.Model.System.Dto
         public string Locations { get; set; }
 
         public DateTime? LastFailTime { get; set; }
+    }
+
+    /// <summary>
+    /// 异地/新地点成功登录账号统计（成功侧异地信号）。
+    /// 地点按省-市归一化（忽略运营商与未知段），与登录时的异地提醒同一口径。
+    /// </summary>
+    public class RemoteLoginAccountStat
+    {
+        /// <summary>账号</summary>
+        public string UserName { get; set; }
+
+        /// <summary>区间内成功登录次数</summary>
+        public long SuccessCount { get; set; }
+
+        /// <summary>成功登录来源地点去重数（大于 1 提示异地/共享账号可能）</summary>
+        public long LocationCount { get; set; }
+
+        /// <summary>成功登录来源地点列表（最多 5 个）</summary>
+        public string Locations { get; set; }
+
+        /// <summary>相对近 30 天成功历史新增的地点数</summary>
+        public long NewLocationCount { get; set; }
+
+        /// <summary>相对近 30 天成功历史新增的地点列表（最多 3 个）</summary>
+        public string NewLocations { get; set; }
+
+        /// <summary>2 小时内切换不同地点成功登录的次数（盗号/共享高置信信号）</summary>
+        public long RapidSwitchCount { get; set; }
+
+        /// <summary>最近一次成功登录时间</summary>
+        public DateTime? LastLoginTime { get; set; }
     }
 
     /// <summary>
