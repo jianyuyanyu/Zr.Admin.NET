@@ -25,6 +25,7 @@ namespace ZR.ServiceCore.AI
     {
         private readonly ISysAiService _sysAi;
         private readonly IDailyScheduleService _scheduleService;
+        private readonly IAiChatLlmGateway _llm;
         private readonly IReadOnlyList<IAiAssistantToolProvider> _toolProviders;
         private readonly IReadOnlyList<AiToolDef> _providerToolDefs;
         private readonly Dictionary<string, IAiAssistantToolProvider> _toolProviderMap;
@@ -38,11 +39,16 @@ namespace ZR.ServiceCore.AI
         /// <summary>单条工具结果回灌给模型的最大长度</summary>
         private const int ToolResultMaxLen = 8000;
 
+        /// <param name="sysAi">系统 AI 服务（日程解析/周报）</param>
+        /// <param name="scheduleService">日程服务（日程查询工具）</param>
+        /// <param name="llm">大模型调用网关（封装静态 AiLlmClient，便于测试替换）</param>
+        /// <param name="toolProviders">各模块注册的扩展工具提供者</param>
         public SysAiChatService(ISysAiService sysAi, IDailyScheduleService scheduleService,
-            IEnumerable<IAiAssistantToolProvider> toolProviders)
+            IAiChatLlmGateway llm, IEnumerable<IAiAssistantToolProvider> toolProviders)
         {
             _sysAi = sysAi;
             _scheduleService = scheduleService;
+            _llm = llm;
             _toolProviders = (toolProviders ?? []).ToList();
 
             var defs = new List<AiToolDef>();
@@ -215,7 +221,7 @@ namespace ZR.ServiceCore.AI
                 AiLlmClient.ChatToolResult turn;
                 try
                 {
-                    turn = await AiLlmClient.ChatWithToolsAsync(context.Options, context.Messages.ToArray(), context.Tools, "ai_chat");
+                    turn = await _llm.ChatWithToolsAsync(context.Options, context.Messages.ToArray(), context.Tools, "ai_chat");
                 }
                 catch (Exception ex)
                 {
@@ -280,7 +286,7 @@ namespace ZR.ServiceCore.AI
                 AiLlmClient.ChatToolResult turn = null;
                 // 模型流式调用：逐块转发增量文本，结束时聚合出本轮完整结果。
                 // 注意：迭代段内不得被 try/catch 包裹（含 yield return），异常向上冒出由调用方转 error 事件。
-                await foreach (var chunk in AiLlmClient.StreamChatWithToolsAsync(context.Options, context.Messages.ToArray(), context.Tools, "ai_chat", cancellationToken).WithCancellation(cancellationToken))
+                await foreach (var chunk in _llm.StreamChatWithToolsAsync(context.Options, context.Messages.ToArray(), context.Tools, "ai_chat", cancellationToken).WithCancellation(cancellationToken))
                 {
                     if (chunk.Type == "delta" && !string.IsNullOrEmpty(chunk.Text))
                     {
@@ -607,7 +613,7 @@ namespace ZR.ServiceCore.AI
             }
 
             var options = AiHelper.EnsureAiEnabled();
-            var resolved = AiLlmClient.ResolveProvider(options);
+            var resolved = _llm.ResolveProvider(options);
             var model = string.IsNullOrWhiteSpace(resolved.Model) ? options.Model : resolved.Model;
 
             var isNewSession = sessionId <= 0;
