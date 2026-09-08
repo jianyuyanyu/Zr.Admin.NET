@@ -4,10 +4,6 @@ using Infrastructure.Model;
 using Microsoft.IdentityModel.Tokens;
 using Newtonsoft.Json.Linq;
 using NLog;
-using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Runtime.CompilerServices;
-using System.Text;
 using ZR.Model.AI;
 using ZR.Model.AI.Dto;
 using ZR.Model.System.Dto;
@@ -28,7 +24,9 @@ namespace ZR.ServiceCore.AI
     {
         private readonly ISysAiService _sysAi;
         private readonly IDailyScheduleService _scheduleService;
-        private readonly IEnumerable<IAiAssistantToolProvider> _toolProviders;
+        private readonly IReadOnlyList<IAiAssistantToolProvider> _toolProviders;
+        private readonly IReadOnlyList<AiToolDef> _providerToolDefs;
+        private readonly Dictionary<string, IAiAssistantToolProvider> _toolProviderMap;
 
         private static readonly Logger _logger = LogManager.GetCurrentClassLogger();
 
@@ -44,7 +42,25 @@ namespace ZR.ServiceCore.AI
         {
             _sysAi = sysAi;
             _scheduleService = scheduleService;
-            _toolProviders = toolProviders;
+            _toolProviders = (toolProviders ?? []).ToList();
+
+            var defs = new List<AiToolDef>();
+            _toolProviderMap = new Dictionary<string, IAiAssistantToolProvider>(StringComparer.OrdinalIgnoreCase);
+            foreach (var provider in _toolProviders)
+            {
+                var providerDefs = provider.GetToolDefs();
+                if (providerDefs == null || providerDefs.Count == 0) continue;
+                foreach (var def in providerDefs)
+                {
+                    if (def == null || string.IsNullOrWhiteSpace(def.Name)) continue;
+                    defs.Add(def);
+                    if (!_toolProviderMap.ContainsKey(def.Name))
+                    {
+                        _toolProviderMap.Add(def.Name, provider);
+                    }
+                }
+            }
+            _providerToolDefs = defs;
         }
 
         #region 会话 CRUD
@@ -58,7 +74,7 @@ namespace ZR.ServiceCore.AI
         {
             var list = await Queryable()
                 .Where(m => m.UserId == userId)
-                .OrderBy(m => m.CreateTime, OrderByType.Desc)
+                .OrderBy(m => m.UpdateTime, OrderByType.Desc)
                 .Take(50)
                 .ToListAsync();
             return [.. list.Select(m => new SysAiChatSessionDto
@@ -185,50 +201,9 @@ namespace ZR.ServiceCore.AI
         /// <exception cref="Exception"></exception>
         public async Task<SysAiChatResultDto> ChatAsync(long sessionId, long userId, string message)
         {
-            message = (message ?? "").Trim();
-            if (string.IsNullOrWhiteSpace(message))
-            {
-                throw new Exception("消息内容不能为空");
-            }
-            var options = AiHelper.EnsureAiEnabled();
-            var resolved = AiLlmClient.ResolveProvider(options);
-            var model = string.IsNullOrWhiteSpace(resolved.Model) ? options.Model : resolved.Model;
-
-            // 1. 会话归属
-            var isNewSession = sessionId <= 0;
-            AiChatSession session;
-            if (isNewSession)
-            {
-                session = new AiChatSession { UserId = userId, Title = "新对话" };
-                session.SessionId = await Context.Insertable(session).ExecuteReturnSnowflakeIdAsync();
-            }
-            else
-            {
-                session = await Queryable()
-                    .Where(m => m.SessionId == sessionId && m.UserId == userId)
-                    .FirstAsync() ?? throw new Exception("会话不存在或无权访问");
-            }
-
-            // 2. 组装消息（系统提示 + 历史 + 当前提问）
-            var messages = new List<object>
-            {
-                new { role = "system", content = BuildSystemPrompt(userId) }
-            };
-
-            var history = await Context.Queryable<AiChatMessage>()
-                .Where(m => m.SessionId == session.SessionId && m.UserId == userId && m.Role != "tool")
-                .OrderBy(m => m.CreateTime, OrderByType.Desc)
-                .Take(MaxHistoryMessages)
-                .ToListAsync();
-            history.Reverse();// 历史按时间正序回灌
-            foreach (var h in history)
-            {
-                messages.Add(new { role = h.Role, content = AiHelper.ClipText(h.Content, 2000) });
-            }
-            messages.Add(new { role = "user", content = message });
+            var context = await PrepareChatContextAsync(sessionId, userId, message);
 
             // 3. 工具调用编排
-            var tools = BuildToolObjects();
             string reply = "";
             var chartQueries = new List<AiChartQueryResult>();
             var roundDiag = new List<string>();
@@ -239,71 +214,36 @@ namespace ZR.ServiceCore.AI
                 AiLlmClient.ChatToolResult turn;
                 try
                 {
-                    turn = await AiLlmClient.ChatWithToolsAsync(options, messages.ToArray(), tools, "ai_chat");
+                    turn = await AiLlmClient.ChatWithToolsAsync(context.Options, context.Messages.ToArray(), context.Tools, "ai_chat");
                 }
                 catch (Exception ex)
                 {
                     // 详情只写后端日志；异常上抛，由上层返回友好提示，不让内部细节透出到前端
-                    _logger.Error($"AI 模型调用异常 sessionId={session.SessionId} userId={userId} model={model} msg={AiHelper.ClipText(message, 200)} err={ex}");
+                    _logger.Error($"AI 模型调用异常 sessionId={context.Session.SessionId} userId={userId} model={context.Model} msg={AiHelper.ClipText(context.Message, 200)} err={ex}");
                     throw;
                 }
-                // 一次对话可能多次调用模型，累计本轮用量便于回填消息级 token
-                totalPromptTokens += turn.PromptTokens;
-                totalCompletionTokens += turn.CompletionTokens;
-                totalTokens += turn.TotalTokens;
-                if (totalTokens > 0) hasUsage = true;
-                var contentLen = turn.Content?.Length ?? 0;
-                var toolNames = turn.ToolCalls?.Select(x => x.Name) ?? new List<string>();
-                roundDiag.Add($"r{round + 1}:finish={turn.FinishReason ?? "null"},contentLen={contentLen},tools=[{string.Join(",", toolNames)}]");
+
+                AccumulateRoundUsage(turn, round, roundDiag,
+                    ref hasUsage, ref totalPromptTokens, ref totalCompletionTokens, ref totalTokens);
 
                 if (turn.ToolCalls == null || turn.ToolCalls.Count == 0)
                 {
                     reply = turn.Content ?? "";
                     break;
                 }
-                // 记录 assistant 的工具调用请求
-                messages.Add(new
-                {
-                    role = "assistant",
-                    content = turn.Content ?? "",
-                    tool_calls = turn.ToolCalls.Select(c => new
-                    {
-                        id = c.Id,
-                        type = "function",
-                        function = new { name = c.Name, arguments = c.Arguments }
-                    }).ToArray()
-                });
-                // 逐条执行工具并把结果回灌
+
+                AppendAssistantToolCalls(context.Messages, turn);
                 foreach (var call in turn.ToolCalls)
                 {
-                    AiToolExecResult exec;
-                    try
-                    {
-                        exec = await ExecuteToolAsync(call.Name, call.Arguments, userId, session.SessionId);
-                    }
-                    catch (Exception ex)
-                    {
-                        // 详情只写后端日志便于排查；回灌给模型的是通用失败提示，
-                        // 避免把内部异常细节经模型转述暴露给前端。
-                        _logger.Error($"AI 工具执行异常 tool={call.Name} args={AiHelper.ClipText(call.Arguments ?? "", 300)} err={ex}");
-                        exec = AiToolExecResult.Error("该操作执行失败，请告知用户稍后重试");
-                    }
-                    var content = exec.Content ?? "";
-                    if (!exec.Ok)
-                    {
-                        content = $"[错误] {content}";
-                    }
-                    else if (exec.ChartQuery != null)
-                    {
-                        chartQueries.Add(exec.ChartQuery);
-                    }
-                    messages.Add(new { role = "tool", tool_call_id = call.Id, content = AiHelper.ClipText(content, ToolResultMaxLen) });
+                    var exec = await ExecuteToolSafelyAsync(call, userId, context.Session.SessionId);
+                    AppendToolResult(context.Messages, call.Id, exec, chartQueries);
                 }
             }
+
             if (string.IsNullOrWhiteSpace(reply))
             {
-                _logger.Error($"AI 回复为空(触发兜底文案) userId={userId} sessionId={session.SessionId} model={model} " +
-                    $"msg={AiHelper.ClipText(message, 200)} history={history.Count} rounds={string.Join(" | ", roundDiag)}");
+                _logger.Error($"AI 回复为空(触发兜底文案) userId={userId} sessionId={context.Session.SessionId} model={context.Model} " +
+                    $"msg={AiHelper.ClipText(context.Message, 200)} history={context.HistoryCount} rounds={string.Join(" | ", roundDiag)}");
                 reply = "抱歉，我这边没有正常生成回答，请重新描述一下你的问题。";
             }
 
@@ -312,7 +252,7 @@ namespace ZR.ServiceCore.AI
             var charts = assembled.Charts;
 
             // 4. 落库 + 会话元信息维护
-            return await FinishTurnAsync(session, isNewSession, userId, message, reply, model,
+            return await FinishTurnAsync(context.Session, context.IsNewSession, userId, context.Message, reply, context.Model,
                 hasUsage, totalPromptTokens, totalCompletionTokens, totalTokens, charts);
         }
 
@@ -324,49 +264,9 @@ namespace ZR.ServiceCore.AI
         /// </summary>
         public async IAsyncEnumerable<SysAiChatStreamDto> StreamChatAsync(long sessionId, long userId, string message)
         {
-            message = (message ?? "").Trim();
-            if (string.IsNullOrWhiteSpace(message))
-            {
-                throw new Exception("消息内容不能为空");
-            }
-            var options = AiHelper.EnsureAiEnabled();
-            var resolved = AiLlmClient.ResolveProvider(options);
-            var model = string.IsNullOrWhiteSpace(resolved.Model) ? options.Model : resolved.Model;
-
-            // 1. 会话归属
-            var isNewSession = sessionId <= 0;
-            AiChatSession session;
-            if (isNewSession)
-            {
-                session = new AiChatSession { UserId = userId, Title = "新对话" };
-                session.SessionId = await Context.Insertable(session).ExecuteReturnSnowflakeIdAsync();
-            }
-            else
-            {
-                session = await Queryable()
-                    .Where(m => m.SessionId == sessionId && m.UserId == userId)
-                    .FirstAsync() ?? throw new Exception("会话不存在或无权访问");
-            }
-
-            // 2. 组装消息（系统提示 + 历史 + 当前提问）
-            var messages = new List<object>
-            {
-                new { role = "system", content = BuildSystemPrompt(userId) }
-            };
-            var history = await Context.Queryable<AiChatMessage>()
-                .Where(m => m.SessionId == session.SessionId && m.UserId == userId && m.Role != "tool")
-                .OrderBy(m => m.CreateTime, OrderByType.Desc)
-                .Take(MaxHistoryMessages)
-                .ToListAsync();
-            history.Reverse();// 历史按时间正序回灌
-            foreach (var h in history)
-            {
-                messages.Add(new { role = h.Role, content = AiHelper.ClipText(h.Content, 2000) });
-            }
-            messages.Add(new { role = "user", content = message });
+            var context = await PrepareChatContextAsync(sessionId, userId, message);
 
             // 3. 工具调用编排（流式）
-            var tools = BuildToolObjects();
             string reply = "";
             var chartQueries = new List<AiChartQueryResult>();
             var roundDiag = new List<string>();
@@ -377,7 +277,7 @@ namespace ZR.ServiceCore.AI
                 AiLlmClient.ChatToolResult turn = null;
                 // 模型流式调用：逐块转发增量文本，结束时聚合出本轮完整结果。
                 // 注意：迭代段内不得被 try/catch 包裹（含 yield return），异常向上冒出由调用方转 error 事件。
-                await foreach (var chunk in AiLlmClient.StreamChatWithToolsAsync(options, messages.ToArray(), tools, "ai_chat"))
+                await foreach (var chunk in AiLlmClient.StreamChatWithToolsAsync(context.Options, context.Messages.ToArray(), context.Tools, "ai_chat"))
                 {
                     if (chunk.Type == "delta" && !string.IsNullOrEmpty(chunk.Text))
                     {
@@ -392,65 +292,30 @@ namespace ZR.ServiceCore.AI
                 {
                     throw new HttpRequestException("AI 服务未返回有效响应，请重试");
                 }
-                // 一次对话可能多次调用模型，累计本轮用量便于回填消息级 token
-                totalPromptTokens += turn.PromptTokens;
-                totalCompletionTokens += turn.CompletionTokens;
-                totalTokens += turn.TotalTokens;
-                if (totalTokens > 0) hasUsage = true;
-                var contentLen = turn.Content?.Length ?? 0;
-                var toolNames = turn.ToolCalls?.Select(x => x.Name) ?? new List<string>();
-                roundDiag.Add($"r{round + 1}:finish={turn.FinishReason ?? "null"},contentLen={contentLen},tools=[{string.Join(",", toolNames)}]");
+
+                AccumulateRoundUsage(turn, round, roundDiag,
+                    ref hasUsage, ref totalPromptTokens, ref totalCompletionTokens, ref totalTokens);
 
                 if (turn.ToolCalls == null || turn.ToolCalls.Count == 0)
                 {
                     reply = turn.Content ?? "";
                     break;
                 }
-                // 记录 assistant 的工具调用请求
-                messages.Add(new
-                {
-                    role = "assistant",
-                    content = turn.Content ?? "",
-                    tool_calls = turn.ToolCalls.Select(c => new
-                    {
-                        id = c.Id,
-                        type = "function",
-                        function = new { name = c.Name, arguments = c.Arguments }
-                    }).ToArray()
-                });
-                // 逐条执行工具并把结果回灌
+
+                AppendAssistantToolCalls(context.Messages, turn);
                 foreach (var call in turn.ToolCalls)
                 {
                     yield return new SysAiChatStreamDto { Type = "tool", ToolName = call.Name, ToolStatus = "start" };
-                    AiToolExecResult exec;
-                    try
-                    {
-                        exec = await ExecuteToolAsync(call.Name, call.Arguments, userId, session.SessionId);
-                    }
-                    catch (Exception ex)
-                    {
-                        // 详情只写后端日志便于排查；回灌给模型的是通用失败提示，
-                        // 避免把内部异常细节经模型转述暴露给前端。
-                        _logger.Error($"AI 工具执行异常 tool={call.Name} args={AiHelper.ClipText(call.Arguments ?? "", 300)} err={ex}");
-                        exec = AiToolExecResult.Error("该操作执行失败，请告知用户稍后重试");
-                    }
+                    var exec = await ExecuteToolSafelyAsync(call, userId, context.Session.SessionId);
                     yield return new SysAiChatStreamDto { Type = "tool", ToolName = call.Name, ToolStatus = "done", ToolOk = exec.Ok };
-                    var content = exec.Content ?? "";
-                    if (!exec.Ok)
-                    {
-                        content = $"[错误] {content}";
-                    }
-                    else if (exec.ChartQuery != null)
-                    {
-                        chartQueries.Add(exec.ChartQuery);
-                    }
-                    messages.Add(new { role = "tool", tool_call_id = call.Id, content = AiHelper.ClipText(content, ToolResultMaxLen) });
+                    AppendToolResult(context.Messages, call.Id, exec, chartQueries);
                 }
             }
+
             if (string.IsNullOrWhiteSpace(reply))
             {
-                _logger.Error($"AI 回复为空(触发兜底文案) userId={userId} sessionId={session.SessionId} model={model} " +
-                    $"msg={AiHelper.ClipText(message, 200)} history={history.Count} rounds={string.Join(" | ", roundDiag)}");
+                _logger.Error($"AI 回复为空(触发兜底文案) userId={userId} sessionId={context.Session.SessionId} model={context.Model} " +
+                    $"msg={AiHelper.ClipText(message, 200)} history={context.HistoryCount} rounds={string.Join(" | ", roundDiag)}");
                 reply = "抱歉，我这边没有正常生成回答，请重新描述一下你的问题。";
             }
 
@@ -459,7 +324,7 @@ namespace ZR.ServiceCore.AI
             var charts = assembled.Charts;
 
             // 4. 落库 + 会话元信息维护
-            var result = await FinishTurnAsync(session, isNewSession, userId, message, reply, model,
+            var result = await FinishTurnAsync(context.Session, context.IsNewSession, userId, context.Message, reply, context.Model,
                 hasUsage, totalPromptTokens, totalCompletionTokens, totalTokens, charts);
             yield return new SysAiChatStreamDto
             {
@@ -592,17 +457,10 @@ namespace ZR.ServiceCore.AI
                     required = Array.Empty<string>()
                 }
             });
-            if (_toolProviders != null)
+
+            foreach (var def in _providerToolDefs)
             {
-                foreach (var provider in _toolProviders)
-                {
-                    var defs = provider.GetToolDefs();
-                    if (defs == null) continue;
-                    foreach (var def in defs)
-                    {
-                        Add(def);
-                    }
-                }
+                Add(def);
             }
             return tools.ToArray();
         }
@@ -628,15 +486,12 @@ namespace ZR.ServiceCore.AI
                     return await GenerateWeeklyReportAsync(userId);
             }
 
-            if (_toolProviders != null)
+            if (_toolProviderMap.TryGetValue(toolName ?? string.Empty, out var provider))
             {
-                foreach (var provider in _toolProviders)
+                var exec = await provider.ExecuteAsync(toolName, arguments, userId);
+                if (exec != null)
                 {
-                    var exec = await provider.ExecuteAsync(toolName, arguments, userId);
-                    if (exec != null)
-                    {
-                        return exec;
-                    }
+                    return exec;
                 }
             }
             return AiToolExecResult.Error($"未知工具：{toolName}");
@@ -718,6 +573,162 @@ namespace ZR.ServiceCore.AI
         #endregion 工具定义与执行
 
         #region helpers
+
+        private sealed class ChatContext
+        {
+            public string Message { get; init; }
+            public AiOptions Options { get; init; }
+            public string Model { get; init; }
+            public bool IsNewSession { get; init; }
+            public AiChatSession Session { get; init; }
+            public List<object> Messages { get; init; }
+            public object[] Tools { get; init; }
+            public int HistoryCount { get; init; }
+        }
+
+        /// <summary>
+        /// 准备聊天上下文：会话解析/创建 + 历史消息回灌 + 系统提示 + 工具定义
+        /// </summary>
+        /// <param name="sessionId"></param>
+        /// <param name="userId"></param>
+        /// <param name="message"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        private async Task<ChatContext> PrepareChatContextAsync(long sessionId, long userId, string message)
+        {
+            message = (message ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                throw new Exception("消息内容不能为空");
+            }
+
+            var options = AiHelper.EnsureAiEnabled();
+            var resolved = AiLlmClient.ResolveProvider(options);
+            var model = string.IsNullOrWhiteSpace(resolved.Model) ? options.Model : resolved.Model;
+
+            var isNewSession = sessionId <= 0;
+            var session = await ResolveSessionAsync(sessionId, userId, isNewSession);
+            var (messages, historyCount) = await BuildConversationMessagesAsync(session.SessionId, userId, message);
+
+            return new ChatContext
+            {
+                Message = message,
+                Options = options,
+                Model = model,
+                IsNewSession = isNewSession,
+                Session = session,
+                Messages = messages,
+                Tools = BuildToolObjects(),
+                HistoryCount = historyCount
+            };
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="sessionId"></param>
+        /// <param name="userId"></param>
+        /// <param name="isNewSession"></param>
+        /// <returns></returns>
+        /// <exception cref="Exception"></exception>
+        private async Task<AiChatSession> ResolveSessionAsync(long sessionId, long userId, bool isNewSession)
+        {
+            if (isNewSession)
+            {
+                var session = new AiChatSession { UserId = userId, Title = "新对话" };
+                session.SessionId = await Context.Insertable(session).ExecuteReturnSnowflakeIdAsync();
+                return session;
+            }
+
+            return await Queryable()
+                .Where(m => m.SessionId == sessionId && m.UserId == userId)
+                .FirstAsync() ?? throw new Exception("会话不存在或无权访问");
+        }
+
+        /// <summary>
+        /// 构建对话消息列表：系统提示 + 历史消息 + 本轮用户消息
+        /// </summary>
+        /// <param name="sessionId"></param>
+        /// <param name="userId"></param>
+        /// <param name="message"></param>
+        /// <returns></returns>
+        private async Task<(List<object> Messages, int HistoryCount)> BuildConversationMessagesAsync(long sessionId, long userId, string message)
+        {
+            var messages = new List<object>
+            {
+                new { role = "system", content = BuildSystemPrompt(userId) }
+            };
+
+            var history = await Context.Queryable<AiChatMessage>()
+                .Where(m => m.SessionId == sessionId && m.UserId == userId && m.Role != "tool")
+                .OrderBy(m => m.CreateTime, OrderByType.Desc)
+                .Take(MaxHistoryMessages)
+                .ToListAsync();
+            history.Reverse();// 历史按时间正序回灌
+            foreach (var h in history)
+            {
+                messages.Add(new { role = h.Role, content = AiHelper.ClipText(h.Content, 2000) });
+            }
+            messages.Add(new { role = "user", content = message });
+            return (messages, history.Count);
+        }
+
+        private static void AccumulateRoundUsage(AiLlmClient.ChatToolResult turn, int round, List<string> roundDiag,
+            ref bool hasUsage, ref int totalPromptTokens, ref int totalCompletionTokens, ref int totalTokens)
+        {
+            totalPromptTokens += turn.PromptTokens;
+            totalCompletionTokens += turn.CompletionTokens;
+            totalTokens += turn.TotalTokens;
+            if (totalTokens > 0) hasUsage = true;
+
+            var contentLen = turn.Content?.Length ?? 0;
+            var toolNames = turn.ToolCalls?.Select(x => x.Name) ?? new List<string>();
+            roundDiag.Add($"r{round + 1}:finish={turn.FinishReason ?? "null"},contentLen={contentLen},tools=[{string.Join(",", toolNames)}]");
+        }
+
+        private static void AppendAssistantToolCalls(List<object> messages, AiLlmClient.ChatToolResult turn)
+        {
+            messages.Add(new
+            {
+                role = "assistant",
+                content = turn.Content ?? "",
+                tool_calls = turn.ToolCalls.Select(c => new
+                {
+                    id = c.Id,
+                    type = "function",
+                    function = new { name = c.Name, arguments = c.Arguments }
+                }).ToArray()
+            });
+        }
+
+        private static void AppendToolResult(List<object> messages, string toolCallId, AiToolExecResult exec, List<AiChartQueryResult> chartQueries)
+        {
+            var content = exec.Content ?? "";
+            if (!exec.Ok)
+            {
+                content = $"[错误] {content}";
+            }
+            else if (exec.ChartQuery != null)
+            {
+                chartQueries.Add(exec.ChartQuery);
+            }
+            messages.Add(new { role = "tool", tool_call_id = toolCallId, content = AiHelper.ClipText(content, ToolResultMaxLen) });
+        }
+
+        private async Task<AiToolExecResult> ExecuteToolSafelyAsync(AiLlmClient.ToolCall call, long userId, long sessionId)
+        {
+            try
+            {
+                return await ExecuteToolAsync(call.Name, call.Arguments, userId, sessionId);
+            }
+            catch (Exception ex)
+            {
+                // 详情只写后端日志便于排查；回灌给模型的是通用失败提示，
+                // 避免把内部异常细节经模型转述暴露给前端。
+                _logger.Error($"AI 工具执行异常 tool={call.Name} args={AiHelper.ClipText(call.Arguments ?? "", 300)} err={ex}");
+                return AiToolExecResult.Error("该操作执行失败，请告知用户稍后重试");
+            }
+        }
 
         private static string BuildSystemPrompt(long userId)
         {
