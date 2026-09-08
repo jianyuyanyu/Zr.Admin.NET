@@ -17,12 +17,18 @@ namespace ZR.ServiceCore.AI
     {
         private static readonly Logger _logger = LogManager.GetCurrentClassLogger();
 
-        public void Record(AiUsageInfo usage)
+        /// <summary>
+        /// 记录一次模型调用的 token 用量到 ai_call_log。
+        /// 异步写入：采集点位于 AI 异步调用链路上，同步写库会阻塞线程池线程。
+        /// 不接收取消令牌：已产生的 token 必须记账，客户端断开不应导致审计漏记。
+        /// 写库失败仅告警，不阻断 AI 调用主链路。
+        /// </summary>
+        public async Task RecordAsync(AiUsageInfo usage)
         {
             if (usage == null) return;
             try
             {
-                Context.Insertable(new AiCallLog
+                await Context.Insertable(new AiCallLog
                 {
                     Scene = Clip(usage.Scene, 64),
                     Provider = Clip(usage.Provider, 32),
@@ -32,7 +38,7 @@ namespace ZR.ServiceCore.AI
                     TotalTokens = usage.TotalTokens,
                     UserId = DataScopeExtensions.GetCurrentUserId(),
                     UserName = App.UserName,
-                }).ExecuteReturnSnowflakeId();
+                }).ExecuteReturnSnowflakeIdAsync();
             }
             catch (Exception ex)
             {

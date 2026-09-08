@@ -1,4 +1,5 @@
 using System;
+using System.Threading.Tasks;
 
 namespace Infrastructure.AI
 {
@@ -34,6 +35,14 @@ namespace Infrastructure.AI
     /// </summary>
     public interface IAiUsageRecorder
     {
-        void Record(AiUsageInfo usage);
+        /// <summary>
+        /// 记录一次模型调用的 token 用量（写 ai_call_log 审计流水）。
+        /// 约定：实现必须内部消化异常（仅告警）后正常返回，不得向调用方抛出，
+        /// 以免审计失败阻断 AI 调用主链路。
+        /// 使用异步签名是因为采集点位于 AI 异步调用链路上，同步写库会阻塞线程池线程。
+        /// 不接收取消令牌：已产生的 token 必须记账，客户端断开不应导致审计漏记。
+        /// </summary>
+        /// <param name="usage">本次调用的用量信息</param>
+        Task RecordAsync(AiUsageInfo usage);
     }
 }

@@ -119,7 +119,7 @@ namespace Infrastructure.AI
                 using var doc = JsonDocument.Parse(responseText);
                 EnsureNoProviderError(responseText, doc.RootElement);
                 var content = ReadContent(doc.RootElement);
-                _ = LogUsage(doc.RootElement, resolved.Provider, resolved.Model, scene);
+                await LogUsageAsync(doc.RootElement, resolved.Provider, resolved.Model, scene);
                 return content;
             }
             catch (JsonException ex)
@@ -167,14 +167,14 @@ namespace Infrastructure.AI
         /// 返回读取到的 token 三元组，供调用方（如 tools 模式）将本轮用量随结果回传。
         /// 部分 Provider 可能不返回 usage，缺字段时按 0 处理，不抛异常。
         /// </summary>
-        private static (int Prompt, int Completion, int Total) LogUsage(JsonElement root, string provider, string model, string scene = null)
+        private static async Task<(int Prompt, int Completion, int Total)> LogUsageAsync(JsonElement root, string provider, string model, string scene = null)
         {
             try
             {
                 var (promptTokens, completionTokens, totalTokens) = ReadUsageTokens(root, provider);
                 Logger.LogInformation("AI token usage [provider={Provider}, model={Model}, scene={Scene}] 输入(prompt)={PromptTokens} 输出(completion)={CompletionTokens} 合计(total)={TotalTokens}",
                     provider, model, scene, promptTokens, completionTokens, totalTokens);
-                ReportUsage(scene, provider, model, promptTokens, completionTokens, totalTokens);
+                await ReportUsageAsync(scene, provider, model, promptTokens, completionTokens, totalTokens);
                 return (promptTokens, completionTokens, totalTokens);
             }
             catch (Exception ex)
@@ -210,12 +210,14 @@ namespace Infrastructure.AI
         /// token 用量上报：宿主注册 IAiUsageRecorder（写入 ai_call_log 审计流水）时执行；
         /// 未注册或写库失败仅告警，不阻断对话主链路。
         /// </summary>
-        private static void ReportUsage(string scene, string provider, string model,
+        private static async Task ReportUsageAsync(string scene, string provider, string model,
             int promptTokens, int completionTokens, int totalTokens)
         {
             try
             {
-                App.GetService<IAiUsageRecorder>()?.Record(new AiUsageInfo
+                var recorder = App.GetService<IAiUsageRecorder>();
+                if (recorder == null) return;
+                await recorder.RecordAsync(new AiUsageInfo
                 {
                     Scene = scene,
                     Provider = provider,
@@ -398,7 +400,7 @@ namespace Infrastructure.AI
                 using var doc = JsonDocument.Parse(responseText);
                 EnsureNoProviderError(responseText, doc.RootElement);
                 var result = ReadToolResult(doc.RootElement);
-                var (prompt, completion, total) = LogUsage(doc.RootElement, resolved.Provider, resolved.Model, scene);
+                var (prompt, completion, total) = await LogUsageAsync(doc.RootElement, resolved.Provider, resolved.Model, scene);
                 result.PromptTokens = prompt;
                 result.CompletionTokens = completion;
                 result.TotalTokens = total;
@@ -633,7 +635,7 @@ namespace Infrastructure.AI
 
             Logger.LogInformation("AI token usage [provider={Provider}, model={Model}, scene={Scene}] 输入(prompt)={PromptTokens} 输出(completion)={CompletionTokens} 合计(total)={TotalTokens}",
                 resolved.Provider, resolved.Model, scene, promptTokens, completionTokens, totalTokens);
-            ReportUsage(scene, resolved.Provider, resolved.Model, promptTokens, completionTokens, totalTokens);
+            await ReportUsageAsync(scene, resolved.Provider, resolved.Model, promptTokens, completionTokens, totalTokens);
 
             var result = new ChatToolResult
             {
