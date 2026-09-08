@@ -7,6 +7,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Infrastructure.AI
@@ -436,8 +437,9 @@ namespace Infrastructure.AI
         /// 上层自行控制纠错轮次与工具结果回灌（每轮迭代到 finish 后判断 ToolCalls）。
         /// 迭代中逐块 yield delta；HTTP/解析/服务错误直接抛 HttpRequestException，由上层决定展示策略。
         /// </summary>
-        public static async IAsyncEnumerable<AiStreamChunk> StreamChatWithToolsAsync(AiOptions options, object[] messages, object[] tools, string scene = null)
+        public static async IAsyncEnumerable<AiStreamChunk> StreamChatWithToolsAsync(AiOptions options, object[] messages, object[] tools, string scene = null, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var resolved = ResolveProvider(options);
             var uri = BuildRequestUri(options);
             var payload = new Dictionary<string, object>
@@ -464,10 +466,13 @@ namespace Infrastructure.AI
             };
 
             using var streamResp = await HttpHelper.HttpPostReadStreamAsync(uri.ToString(), json, "application/json", options.TimeoutSeconds, headers);
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(streamResp.Token, cancellationToken);
+            var token = linkedCts.Token;
+
             var response = streamResp.Response;
             if (!response.IsSuccessStatusCode)
             {
-                var errBody = await response.Content.ReadAsStringAsync(streamResp.Token);
+                var errBody = await response.Content.ReadAsStringAsync(token);
                 Logger.LogError("AI 流式请求失败 status={Status} uri={Uri} model={Model} body={Body}",
                     (int)response.StatusCode, uri, resolved.Model, TruncateForLog(errBody, 400));
                 // 与 ChatWithToolsAsync 的 EnsureNoProviderError 对齐：细节只写日志，上抛固定文案
@@ -481,7 +486,7 @@ namespace Infrastructure.AI
             var completionTokens = 0;
             var totalTokens = 0;
 
-            await using var stream = await response.Content.ReadAsStreamAsync(streamResp.Token);
+            await using var stream = await response.Content.ReadAsStreamAsync(token);
             var buffer = new byte[8192];
             var lineBytes = new MemoryStream();
             var done = false;
@@ -490,10 +495,14 @@ namespace Infrastructure.AI
                 int read;
                 try
                 {
-                    read = await stream.ReadAsync(buffer, 0, buffer.Length, streamResp.Token);
+                    read = await stream.ReadAsync(buffer, 0, buffer.Length, token);
                 }
                 catch (OperationCanceledException)
                 {
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
                     throw new HttpRequestException("AI 流式响应超时，连接已中断，请重试");
                 }
                 if (read <= 0) break;
@@ -606,7 +615,6 @@ namespace Infrastructure.AI
                         }
                         else
                         {
-                            // 非标准纯文本流兜底：整行作为文本增量输出
                             content.Append(data);
                             yield return new AiStreamChunk { Type = "delta", Text = data };
                         }

@@ -4,6 +4,7 @@ using Infrastructure.Model;
 using Microsoft.IdentityModel.Tokens;
 using Newtonsoft.Json.Linq;
 using NLog;
+using System.Runtime.CompilerServices;
 using ZR.Model.AI;
 using ZR.Model.AI.Dto;
 using ZR.Model.System.Dto;
@@ -262,8 +263,9 @@ namespace ZR.ServiceCore.AI
         /// delta=模型增量文本（实时推送）；tool=工具执行开始/结束；done=整轮结束（含落库结果）。
         /// 模型/业务异常直接向上抛出，由调用方转为 error 事件；成功流必有最后一个 done 事件。
         /// </summary>
-        public async IAsyncEnumerable<SysAiChatStreamDto> StreamChatAsync(long sessionId, long userId, string message)
+        public async IAsyncEnumerable<SysAiChatStreamDto> StreamChatAsync(long sessionId, long userId, string message, [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var context = await PrepareChatContextAsync(sessionId, userId, message);
 
             // 3. 工具调用编排（流式）
@@ -274,10 +276,11 @@ namespace ZR.ServiceCore.AI
             int totalPromptTokens = 0, totalCompletionTokens = 0, totalTokens = 0;
             for (var round = 0; round < MaxToolRounds; round++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 AiLlmClient.ChatToolResult turn = null;
                 // 模型流式调用：逐块转发增量文本，结束时聚合出本轮完整结果。
                 // 注意：迭代段内不得被 try/catch 包裹（含 yield return），异常向上冒出由调用方转 error 事件。
-                await foreach (var chunk in AiLlmClient.StreamChatWithToolsAsync(context.Options, context.Messages.ToArray(), context.Tools, "ai_chat"))
+                await foreach (var chunk in AiLlmClient.StreamChatWithToolsAsync(context.Options, context.Messages.ToArray(), context.Tools, "ai_chat", cancellationToken).WithCancellation(cancellationToken))
                 {
                     if (chunk.Type == "delta" && !string.IsNullOrEmpty(chunk.Text))
                     {
@@ -305,6 +308,7 @@ namespace ZR.ServiceCore.AI
                 AppendAssistantToolCalls(context.Messages, turn);
                 foreach (var call in turn.ToolCalls)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     yield return new SysAiChatStreamDto { Type = "tool", ToolName = call.Name, ToolStatus = "start" };
                     var exec = await ExecuteToolSafelyAsync(call, userId, context.Session.SessionId);
                     yield return new SysAiChatStreamDto { Type = "tool", ToolName = call.Name, ToolStatus = "done", ToolOk = exec.Ok };

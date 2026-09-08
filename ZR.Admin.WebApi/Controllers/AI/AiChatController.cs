@@ -209,7 +209,7 @@ namespace ZR.Admin.WebApi.Controllers.AI
 
             try
             {
-                await foreach (var evt in _aiChatService.StreamChatAsync(parm.SessionId, userId, parm.Message))
+                await foreach (var evt in _aiChatService.StreamChatAsync(parm.SessionId, userId, parm.Message, aborted))
                 {
                     await WriteEventAsync(evt, aborted);
                 }
