@@ -107,6 +107,22 @@ namespace ZR.Model.System.Dto
     }
 
     /// <summary>
+    /// 登录日志按省份（IP 解析出的地域）统计。
+    /// Region 为省级名称（如"河南省""天津市"），无法解析时归入"未知"。
+    /// </summary>
+    public class LoginRegionStat
+    {
+        /// <summary>省份名称；含"未知"与"其他"（长尾合并项）</summary>
+        public string Region { get; set; }
+
+        /// <summary>登录次数（成功+失败）</summary>
+        public long LoginCount { get; set; }
+
+        /// <summary>独立用户数（按账号去重）</summary>
+        public long UserCount { get; set; }
+    }
+
+    /// <summary>
     /// 登录失败账号统计
     /// </summary>
     public class LoginFailAccountStat

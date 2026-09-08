@@ -478,6 +478,124 @@ namespace ZR.ServiceCore.Services
             metrics.RemoteLoginAccounts = top;
         }
 
+        // 地域分布统计的区间上限：省份数有限，允许比按天趋势更长的跨度
+        private const int RegionStatsMaxDays = 180;
+        private const string UnknownRegionName = "未知";
+        private const string OtherRegionName = "其他";
+
+        /// <summary>
+        /// 按省份聚合登录日志的地域分布（供 AI 图表问答使用，不返回原始日志）。
+        /// 口径与登录日志列表一致：租户库 + 数据范围过滤（非管理员仅统计本人）。
+        /// 地域取自登录时 IP 解析写入的 LoginLocation（格式"省-市-运营商"），取首段作为省份。
+        /// </summary>
+        public List<LoginRegionStat> GetLoginRegionStats(LogAiAnalysisInput input, int topN = 12)
+        {
+            input ??= new LogAiAnalysisInput();
+            var (begin, end) = input.ResolveRange(RegionStatsMaxDays);
+            var db = ResolveTenantDb();
+
+            // 按（账号, 地点）粒度聚合：既避免拉取全量明细，又保证"独立用户数"在同省跨市时不重复计数。
+            // 若直接按地点分组求 DistinctCount，同省不同市会把同一账号重复计入。
+            var rows = BuildRangeQuery(db, begin, end)
+                .GroupBy(it => new { it.UserName, it.LoginLocation })
+                .Select(it => new
+                {
+                    UserName = it.UserName,
+                    Location = it.LoginLocation,
+                    Num = SqlFunc.AggregateCount(it.InfoId)
+                })
+                .ToList();
+
+            var loginCount = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            var users = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var row in rows)
+            {
+                var region = ExtractProvince(row.Location);
+                loginCount.TryGetValue(region, out var count);
+                loginCount[region] = count + row.Num;
+
+                if (!users.TryGetValue(region, out var set))
+                {
+                    set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    users[region] = set;
+                }
+                // 失败尝试可能没有账号，用空串占位，保证这部分登录次数不丢、且不与其他空值混淆
+                set.Add(row.UserName ?? string.Empty);
+            }
+
+            var stats = loginCount
+                .OrderByDescending(kv => kv.Value)
+                .ThenBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(kv => (
+                    Region: kv.Key,
+                    LoginCount: kv.Value,
+                    Users: users.TryGetValue(kv.Key, out var set) ? set : new HashSet<string>()))
+                .ToList();
+
+            return MergeTailRegions(stats, topN);
+        }
+
+        /// <summary>
+        /// 长尾省份合并为"其他"，避免饼图出现几十个碎扇区。
+        /// 合并时独立用户数取并集而非求和，保证口径与未合并时一致。
+        /// </summary>
+        private static List<LoginRegionStat> MergeTailRegions(
+            List<(string Region, long LoginCount, HashSet<string> Users)> stats, int topN)
+        {
+            if (topN <= 0 || stats.Count <= topN)
+            {
+                return stats.Select(x => ToRegionStat(x)).ToList();
+            }
+
+            var result = stats.Take(topN).Select(ToRegionStat).ToList();
+            var tail = stats.Skip(topN).ToList();
+            if (tail.Count == 0)
+            {
+                return result;
+            }
+
+            var mergedUsers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var item in tail)
+            {
+                mergedUsers.UnionWith(item.Users);
+            }
+
+            result.Add(new LoginRegionStat
+            {
+                Region = OtherRegionName,
+                LoginCount = tail.Sum(x => x.LoginCount),
+                UserCount = mergedUsers.Count
+            });
+            return result;
+        }
+
+        private static LoginRegionStat ToRegionStat((string Region, long LoginCount, HashSet<string> Users) item)
+            => new() { Region = item.Region, LoginCount = item.LoginCount, UserCount = item.Users.Count };
+
+        /// <summary>
+        /// 从 LoginLocation（"省-市-运营商"）提取省份。
+        /// 无法解析（空值或全为占位 0）时归入"未知"，保持与异地登录检测相同的分段规则。
+        /// </summary>
+        private static string ExtractProvince(string location)
+        {
+            if (location.IsEmpty())
+            {
+                return UnknownRegionName;
+            }
+
+            foreach (var segment in location.Split('-', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                // 与 NormalizeLoginLocation 一致：0 是 IP 库未识别时的占位段
+                if (string.Equals(segment, "0", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+                return segment;
+            }
+
+            return UnknownRegionName;
+        }
+
         /// <summary>
         /// 构建区间内登录日志查询（租户库 + 数据范围过滤）。每次调用返回全新 queryable，
         /// 避免 SqlSugar 同一实例在多次聚合之间复用时共享查询状态产生串扰。

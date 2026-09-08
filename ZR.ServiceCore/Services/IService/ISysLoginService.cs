@@ -68,5 +68,15 @@ namespace ZR.ServiceCore.Services
         /// <param name="input">时间范围参数</param>
         /// <returns>聚合指标</returns>
         LoginSecurityMetricsDto GetLoginSecurityMetrics(LogAiAnalysisInput input);
+
+        /// <summary>
+        /// 按省份聚合登录日志的地域分布（供 AI 图表问答使用，不返回原始日志）。
+        /// 地域取自登录时 IP 解析写入的 LoginLocation，按"省"归一化；
+        /// 数据权限与登录日志列表一致（非管理员仅统计本人）。
+        /// </summary>
+        /// <param name="input">时间范围参数</param>
+        /// <param name="topN">返回的省份条数上限，其余省份合并为"其他"</param>
+        /// <returns>按登录次数降序的省份统计</returns>
+        List<LoginRegionStat> GetLoginRegionStats(LogAiAnalysisInput input, int topN = 12);
     }
 }
