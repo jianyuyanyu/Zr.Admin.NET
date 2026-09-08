@@ -5,8 +5,11 @@ namespace ZR.Model.AI.Dto
     /// </summary>
     public class AiUsageQueryDto : PagerInfo
     {
-        /// <summary>目标用户（0/null 表示按当前登录人；仅管理员可指定其它用户）</summary>
+        /// <summary>目标用户（0/null：管理员看全量，普通用户强制本人）</summary>
         public long? UserId { get; set; }
+
+        /// <summary>用户名模糊筛选（按用户聚合列表用）</summary>
+        public string UserName { get; set; }
 
         /// <summary>能力场景过滤（ai_chat / wf_generate / lang_translate 等），空为全部</summary>
         public string Scene { get; set; }
@@ -40,6 +43,29 @@ namespace ZR.Model.AI.Dto
 
         /// <summary>按能力场景分布（token 倒序）</summary>
         public List<AiUsageSceneDto> Scenes { get; set; } = new();
+    }
+
+    /// <summary>
+    /// 按用户聚合的时间窗 token 用量（每个用户一行）
+    /// </summary>
+    public class AiUsageUserDto
+    {
+        public long UserId { get; set; }
+
+        /// <summary>用户名；后台任务（UserId=0）显示为系统任务</summary>
+        public string UserName { get; set; }
+
+        /// <summary>调用次数</summary>
+        public int Calls { get; set; }
+
+        /// <summary>输入 token 合计</summary>
+        public long PromptTokens { get; set; }
+
+        /// <summary>输出 token 合计</summary>
+        public long CompletionTokens { get; set; }
+
+        /// <summary>token 合计</summary>
+        public long TotalTokens { get; set; }
     }
 
     /// <summary>

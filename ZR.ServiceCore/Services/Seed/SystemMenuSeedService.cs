@@ -5,9 +5,8 @@ namespace ZR.ServiceCore.Services
 {
     /// <summary>
     /// 系统菜单种子：为 data.xlsx 之外的系统级菜单/按钮权限补种（与具体业务模块无关）。
-    /// 与工作流/商城种子一致：SeedButton/SeedPage 记录定义 + 幂等写入 + 授权所有角色。
-    /// 注意：本类只补 F 按钮与"AI 用量统计"页；父级系统菜单本体（多语言/定时任务/代码生成/日志等）
-    /// 由 data.xlsx 维护，父级缺失时跳过、不自动建页，避免与 data.xlsx 冲突。
+    /// 注意：EnsureAiPermSeedData 只补挂在 data.xlsx 系统页下的 F 按钮；
+    /// EnsureAiUsageMenuSeedData 维护「用量管理」(管理员) +「我的用量」(个人) 两页。
     /// </summary>
     internal sealed class SystemMenuSeedService
     {
@@ -25,34 +24,39 @@ namespace ZR.ServiceCore.Services
         };
 
         /// <summary>
-        /// "AI 用量统计"C 页（挂在系统监控 M 目录下）+ 其下"AI 办公助手"F 按钮。
-        /// 仅当页面缺失时自建；父级 M 目录（monitor）由 data.xlsx 维护，缺失则跳过。
+        /// AI 用量两页：管理员全站（用量管理）+ 个人自助（我的用量）。
         /// </summary>
-        private static readonly SeedPage AiUsagePage = new(
-            Name: "AI 用量统计",
+        private static readonly SeedPage AiUsageAdminPage = new(
+            Name: "用量管理",
             Path: "aiUsage",
-            Component: "monitor/AiUsage",
-            Perms: "",
-            OrderNum: 99,
-            Buttons:
-            [
-                new SeedButton("AI 办公助手", "system:ai:chat", OrderNum: 99),
-            ],
+            Component: "Ai/AiUsage",
+            Perms: "ai:usage:list",
+            OrderNum: 1,
+            Buttons: [],
             Icon: "chart");
 
+        private static readonly SeedPage AiUsageMinePage = new(
+            Name: "我的用量",
+            Path: "myUsage",
+            Component: "Ai/AiUsageMine",
+            Perms: "ai:usage:mine",
+            OrderNum: 2,
+            Buttons:
+            [
+                new SeedButton("AI 办公助手", "ai:chat", OrderNum: 99),
+            ],
+            Icon: "user");
+
         /// <summary>
-        /// 确保系统模块 AI 能力按钮权限存在并授予所有角色（幂等）。
-        /// 多语言、定时任务等系统菜单本体由 data.xlsx 种子维护，此处只补齐新增的 F 类型按钮权限；
-        /// 若不补齐，Controller 上新增的 [ActionPermissionFilter] 会因角色无该权限而一律被拦截（超管除外）。
+        /// 确保系统模块 AI 能力按钮权限存在（幂等）。
+        /// 多语言、定时任务等系统菜单本体由 data.xlsx 种子维护，此处只补齐新增的 F 类型按钮权限。
         /// 菜单未初始化时跳过，下次执行种子时自动补上。
         /// </summary>
         public string EnsureAiPermSeedData()
         {
             var db = DbScoped.SugarScope;
             var now = DateTime.Now;
-
             var inserted = 0;
-            var buttonIds = new List<long>();
 
             foreach (var (parentPerms, btn) in AiButtonDefs)
             {
@@ -60,123 +64,125 @@ namespace ZR.ServiceCore.Services
                     .First(x => x.MenuType == "C" && x.Perms == parentPerms);
                 if (parent == null)
                 {
-                    continue; // 父 C 页（data.xlsx）尚未初始化
+                    continue;
                 }
 
-                var (menuId, isNew) = EnsureButton(parent.MenuId, btn, now, fixParent: false);
+                var (_, isNew) = EnsureButton(parent.MenuId, btn, now);
                 if (isNew) inserted++;
-                buttonIds.Add(menuId);
             }
 
-            if (buttonIds.Count == 0)
-            {
-                return "[系统 AI 权限] 无新增（所属菜单尚未初始化）";
-            }
-
-            var granted = GrantToAllRoles(buttonIds, now);
-            return $"[系统 AI 权限] 新增{inserted}个按钮，授权{granted}条角色关系";
+            return $"[系统 AI 权限] 新增{inserted}个按钮";
         }
 
         /// <summary>
-        /// 确保"AI 用量统计"C 页 + "AI 办公助手"F 按钮存在并授予所有角色（幂等）。
-        /// 用量页挂在"系统监控"(monitor) 目录下，component 对应前端 monitor/AiUsage.vue；
-        /// "AI 办公助手"为挂在用量页下的 F 按钮（Perms=system:ai:chat），是前端顶栏助手入口
-        /// v-hasPermi="['system:ai:chat']" 的权限来源，供角色管理按按钮粒度回收。
-        /// 仅新增 data.xlsx 未覆盖的菜单，父级目录未初始化时跳过，下次执行种子时自动补上。
+        /// 确保 AI 用量菜单：用量管理（管理员全站）+ 我的用量（个人）。
+        /// 权限：ai:usage:list（管理端）、ai:usage:mine + ai:chat（个人端）。
         /// </summary>
         public string EnsureAiUsageMenuSeedData()
         {
             var db = DbScoped.SugarScope;
             var now = DateTime.Now;
 
-            // 父级目录：系统监控（data.xlsx 一级 M 目录，Path=monitor）
-            var monitorMenu = db.Queryable<SysMenu>()
-                .First(x => x.MenuType == "M" && x.ParentId == 0 && x.Path == "monitor");
-            if (monitorMenu == null)
+            var aiMenu = db.Queryable<SysMenu>()
+                .First(x => x.MenuType == "M" && x.Path == "ai");
+            if (aiMenu == null)
             {
-                return "[AI 用量菜单] 系统监控目录尚未初始化，跳过";
+                aiMenu = new SysMenu
+                {
+                    MenuName = "Ai应用",
+                    ParentId = 0,
+                    OrderNum = 50,
+                    Path = "ai",
+                    Component = null,
+                    IsCache = "0",
+                    IsFrame = "0",
+                    MenuType = "M",
+                    Visible = "0",
+                    Status = "0",
+                    Perms = string.Empty,
+                    Icon = "app",
+                    RouteName = "ai",
+                    Create_by = "system",
+                    Create_time = now
+                };
+                aiMenu.MenuId = db.Insertable(aiMenu).ExecuteReturnIdentity();
             }
+
+            var pages = new List<SeedPage>
+            {
+                AiUsageAdminPage,
+                AiUsageMinePage,
+            };
 
             var inserted = 0;
-            var menuIds = new List<long>();
-
-            // C 页：AI 用量统计
-            var (pageId, pageNew) = EnsurePage(monitorMenu.MenuId, AiUsagePage, now);
-            if (pageNew) inserted++;
-            menuIds.Add(pageId);
-
-            // 其下 F 按钮：AI 办公助手
-            foreach (var btn in AiUsagePage.Buttons)
+            foreach (var p in pages)
             {
-                var (menuId, isNew) = EnsureButton(pageId, btn, now, fixParent: true);
-                if (isNew) inserted++;
-                menuIds.Add(menuId);
-            }
-
-            var granted = GrantToAllRoles(menuIds, now);
-            return $"[AI 用量菜单] 菜单已就绪，新增授权{granted}条角色关系";
-        }
-
-        /// <summary>
-        /// 确保 C 类型页面存在并挂到指定父菜单下（幂等）：缺失则插入，
-        /// 已存在但父级不一致时校正父级。
-        /// </summary>
-        private static (long MenuId, bool Inserted) EnsurePage(long parentId, SeedPage p, DateTime now)
-        {
-            var db = DbScoped.SugarScope;
-            var exist = db.Queryable<SysMenu>()
-                .First(x => x.MenuType == "C" && x.Component == p.Component);
-            if (exist != null)
-            {
-                if (exist.ParentId != parentId)
+                var pageMenu = db.Queryable<SysMenu>()
+                    .First(x => x.MenuType == "C" && x.Component == p.Component);
+                if (pageMenu == null)
                 {
-                    exist.ParentId = parentId;
-                    exist.Update_by = "system";
-                    exist.Update_time = now;
-                    db.Updateable(exist).UpdateColumns(x => new { x.ParentId, x.Update_by, x.Update_time }).ExecuteCommand();
+                    pageMenu = new SysMenu
+                    {
+                        MenuName = p.Name,
+                        ParentId = aiMenu.MenuId,
+                        OrderNum = p.OrderNum,
+                        Path = p.Path,
+                        Component = p.Component,
+                        IsCache = "0",
+                        IsFrame = "0",
+                        MenuType = "C",
+                        Visible = p.Visible,
+                        Status = "0",
+                        Perms = p.Perms,
+                        Icon = p.Icon,
+                        RouteName = string.IsNullOrEmpty(p.RouteName) ? null : p.RouteName,
+                        Create_by = "system",
+                        Create_time = now
+                    };
+                    pageMenu.MenuId = db.Insertable(pageMenu).ExecuteReturnIdentity();
+                    inserted++;
                 }
-                return (exist.MenuId, false);
+
+                foreach (var btn in p.Buttons)
+                {
+                    var exist = db.Queryable<SysMenu>()
+                        .Any(x => x.ParentId == pageMenu.MenuId && x.MenuType == "F" && x.Perms == btn.Perms);
+                    if (exist) continue;
+
+                    db.Insertable(new SysMenu
+                    {
+                        MenuName = btn.Name,
+                        ParentId = pageMenu.MenuId,
+                        OrderNum = btn.OrderNum,
+                        Path = string.Empty,
+                        Component = string.Empty,
+                        IsCache = "0",
+                        IsFrame = "0",
+                        MenuType = "F",
+                        Visible = "0",
+                        Status = "0",
+                        Perms = btn.Perms,
+                        Icon = "#",
+                        Create_by = "system",
+                        Create_time = now
+                    }).ExecuteCommand();
+                    inserted++;
+                }
             }
 
-            var menu = new SysMenu
-            {
-                MenuName = p.Name,
-                ParentId = parentId,
-                OrderNum = p.OrderNum,
-                Path = p.Path,
-                Component = p.Component,
-                IsCache = "0",
-                IsFrame = "0",
-                MenuType = "C",
-                Visible = p.Visible,
-                Status = "0",
-                Perms = p.Perms,
-                Icon = p.Icon,
-                MenuNameKey = "",
-                Create_by = "system",
-                Create_time = now
-            };
-            menu.MenuId = db.Insertable(menu).ExecuteReturnIdentity();
-            return (menu.MenuId, true);
+            return $"[AI 用量菜单] 新增{inserted}条菜单";
         }
 
         /// <summary>
-        /// 确保 F 按钮存在（幂等）：缺失则插入到指定父菜单下；已存在且 fixParent=true 时校正父级。
+        /// 确保 F 按钮存在（幂等）：缺失则插入到指定父菜单下。
         /// </summary>
-        private static (long MenuId, bool Inserted) EnsureButton(long parentId, SeedButton btn, DateTime now, bool fixParent)
+        private static (long MenuId, bool Inserted) EnsureButton(long parentId, SeedButton btn, DateTime now)
         {
             var db = DbScoped.SugarScope;
             var exist = db.Queryable<SysMenu>()
                 .First(x => x.MenuType == "F" && x.Perms == btn.Perms);
             if (exist != null)
             {
-                if (fixParent && exist.ParentId != parentId)
-                {
-                    exist.ParentId = parentId;
-                    exist.Update_by = "system";
-                    exist.Update_time = now;
-                    db.Updateable(exist).UpdateColumns(x => new { x.ParentId, x.Update_by, x.Update_time }).ExecuteCommand();
-                }
                 return (exist.MenuId, false);
             }
 
@@ -200,48 +206,6 @@ namespace ZR.ServiceCore.Services
             };
             menu.MenuId = db.Insertable(menu).ExecuteReturnIdentity();
             return (menu.MenuId, true);
-        }
-
-        /// <summary>
-        /// 将给定菜单（C 页 + F 按钮）授权给所有角色，返回新增角色-菜单关系条数（幂等）。
-        /// 原因：Controller 上声明 [ActionPermissionFilter] 的接口，普通角色必须配套拥有该权限，
-        /// 否则访问即被拦截。超管（admin）天然放行，此处补齐其余角色。
-        /// </summary>
-        private static int GrantToAllRoles(List<long> menuIds, DateTime now)
-        {
-            if (menuIds.Count == 0)
-            {
-                return 0;
-            }
-
-            var db = DbScoped.SugarScope;
-            var roleIds = db.Queryable<SysRole>().Select(r => r.RoleId).ToList();
-            if (roleIds.Count == 0)
-            {
-                return 0;
-            }
-
-            var existRoleMenus = db.Queryable<SysRoleMenu>()
-                .Where(rm => menuIds.Contains(rm.Menu_id))
-                .ToList();
-
-            var toInsert = new List<SysRoleMenu>();
-            foreach (var roleId in roleIds)
-            {
-                foreach (var menuId in menuIds)
-                {
-                    if (!existRoleMenus.Any(rm => rm.Role_id == roleId && rm.Menu_id == menuId))
-                    {
-                        toInsert.Add(new SysRoleMenu { Role_id = roleId, Menu_id = menuId, Create_by = "system", Create_time = now });
-                    }
-                }
-            }
-
-            if (toInsert.Count > 0)
-            {
-                db.Insertable(toInsert).ExecuteCommand();
-            }
-            return toInsert.Count;
         }
     }
 }
