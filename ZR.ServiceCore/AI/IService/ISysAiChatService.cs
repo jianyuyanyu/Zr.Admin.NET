@@ -29,5 +29,13 @@ namespace ZR.ServiceCore.AI.IService
         /// SessionId&lt;=0 时自动新建；首轮会依据提问内容自动生成标题。
         /// </summary>
         Task<SysAiChatResultDto> ChatAsync(long sessionId, long userId, string message);
+
+        /// <summary>
+        /// 流式对话（SSE 事件流）：编排语义与 ChatAsync 完全一致，
+        /// 仅模型调用走 stream=true。事件协议见 SysAiChatStreamDto：
+        /// delta=增量文本、tool=工具执行状态、done=整轮结束(含落库结果)、error=异常终止。
+        /// 调用方需逐条序列化输出到 SSE；模型调用异常将向上抛出。
+        /// </summary>
+        IAsyncEnumerable<SysAiChatStreamDto> StreamChatAsync(long sessionId, long userId, string message);
     }
 }

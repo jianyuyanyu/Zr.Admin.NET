@@ -161,6 +161,69 @@ namespace Infrastructure
         }
 
         /// <summary>
+        /// 流式 HTTP 响应。读取响应流时必须使用 Token（timeOut 内未读完会被取消），
+        /// 用完务必 Dispose 以同时释放底层响应与取消令牌。
+        /// </summary>
+        public sealed class HttpStreamResponse : IDisposable
+        {
+            private readonly CancellationTokenSource _cts;
+
+            /// <summary>完整响应（含状态码、Headers，Content 通过 ReadAsStreamAsync 读）</summary>
+            public HttpResponseMessage Response { get; }
+
+            /// <summary>整体超时令牌：发送与流式读取阶段共用，超时即取消</summary>
+            public CancellationToken Token => _cts.Token;
+
+            public HttpStreamResponse(HttpResponseMessage response, CancellationTokenSource cts)
+            {
+                Response = response;
+                _cts = cts;
+            }
+
+            public void Dispose()
+            {
+                Response?.Dispose();
+                _cts?.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// 发起流式读取 POST（SSE / 下载等）。以 ResponseHeadersRead 模式返回，
+        /// 响应体不预先整体读入内存；由调用方通过 HttpStreamResponse.Token 逐块读取。
+        /// </summary>
+        public static async Task<HttpStreamResponse> HttpPostReadStreamAsync(string url, string postData = null, string contentType = null, int timeOut = 30, Dictionary<string, string> headers = null)
+        {
+            postData ??= "";
+            using var httpContent = new StringContent(postData, Encoding.UTF8);
+            if (contentType != null)
+                httpContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
+
+            using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = httpContent };
+            if (headers != null)
+            {
+                foreach (var header in headers)
+                {
+                    if (!request.Content?.Headers.TryAddWithoutValidation(header.Key, header.Value) ?? false)
+                    {
+                        request.Headers.TryAddWithoutValidation(header.Key, header.Value);
+                    }
+                }
+            }
+
+            var cts = new CancellationTokenSource(timeOut * 1000);
+            try
+            {
+                var response = await SharedClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cts.Token);
+                return new HttpStreamResponse(response, cts);
+            }
+            catch
+            {
+                cts.Dispose();
+                throw;
+            }
+        }
+
+        /// <summary>
         /// 发起Put同步请求
         /// </summary>
         /// <param name="url"></param>

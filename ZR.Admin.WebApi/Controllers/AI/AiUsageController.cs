@@ -8,13 +8,13 @@ namespace ZR.Admin.WebApi.Controllers.AI
     /// AI token 用量统计：基于 ai_call_log 提供按天/按能力汇总与调用流水。
     /// 普通用户仅能查自己的用量；管理员（admin）可查全量或指定用户。
     /// </summary>
-    [Route("system/aiUsage")]
+    [Route("aiUsage")]
     [ApiExplorerSettings(GroupName = "ai")]
-    public class SysAiUsageController : BaseController
+    public class AiUsageController : BaseController
     {
         private readonly ISysAiUsageService _aiUsageService;
 
-        public SysAiUsageController(ISysAiUsageService aiUsageService)
+        public AiUsageController(ISysAiUsageService aiUsageService)
         {
             _aiUsageService = aiUsageService;
         }

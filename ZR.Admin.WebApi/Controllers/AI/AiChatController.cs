@@ -1,0 +1,246 @@
+using Infrastructure.AI;
+using Microsoft.AspNetCore.Mvc;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using ZR.Model.AI.Dto;
+using ZR.ServiceCore.AI.IService;
+
+namespace ZR.Admin.WebApi.Controllers.AI
+{
+    /// <summary>
+    /// 全局 AI 助手（办工助手）：会话管理与工具调用对话。
+    /// 权限按登录用户（common），会话/消息/工具数据均按当前登录用户隔离。
+    /// </summary>
+    [Route("aichat")]
+    [ApiExplorerSettings(GroupName = "ai")]
+    public class AiChatController : BaseController
+    {
+        private readonly ISysAiChatService _aiChatService;
+        private static readonly NLog.Logger _logger = NLog.LogManager.GetCurrentClassLogger();
+
+        public AiChatController(ISysAiChatService aiChatService)
+        {
+            _aiChatService = aiChatService;
+        }
+
+        /// <summary>
+        /// 会话列表（按当前用户，最近更新倒序，最多 50 条）
+        /// </summary>
+        [HttpGet("sessions")]
+        [ActionPermissionFilter(Permission = "common")]
+        public async Task<IActionResult> Sessions()
+        {
+            try
+            {
+                var userId = HttpContext.GetUId();
+                return SUCCESS(await _aiChatService.ListSessionsAsync(userId));
+            }
+            catch (Exception ex)
+            {
+                return ToResponse(ResultCode.FAIL, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// 新建空会话
+        /// </summary>
+        [HttpPost("session")]
+        [ActionPermissionFilter(Permission = "common")]
+        public async Task<IActionResult> CreateSession()
+        {
+            try
+            {
+                var userId = HttpContext.GetUId();
+                return SUCCESS(await _aiChatService.CreateSessionAsync(userId));
+            }
+            catch (Exception ex)
+            {
+                return ToResponse(ResultCode.FAIL, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// 重命名会话
+        /// </summary>
+        [HttpPut("session/{sessionId}/rename")]
+        [ActionPermissionFilter(Permission = "common")]
+        public async Task<IActionResult> RenameSession(long sessionId, [FromBody] SysAiChatRenameDto parm)
+        {
+            if (parm == null || string.IsNullOrWhiteSpace(parm.Title))
+            {
+                return ToResponse(ResultCode.FAIL, "标题不能为空");
+            }
+            try
+            {
+                var userId = HttpContext.GetUId();
+                return SUCCESS(await _aiChatService.RenameSessionAsync(sessionId, userId, parm.Title.Trim()));
+            }
+            catch (Exception ex)
+            {
+                return ToResponse(ResultCode.FAIL, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// 删除会话（连同历史消息）
+        /// </summary>
+        [HttpDelete("session/{sessionId}")]
+        [ActionPermissionFilter(Permission = "common")]
+        public async Task<IActionResult> DeleteSession(long sessionId)
+        {
+            try
+            {
+                var userId = HttpContext.GetUId();
+                return SUCCESS(await _aiChatService.DeleteSessionAsync(sessionId, userId));
+            }
+            catch (Exception ex)
+            {
+                return ToResponse(ResultCode.FAIL, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// 会话历史消息（升序）
+        /// </summary>
+        [HttpGet("session/{sessionId}/messages")]
+        [ActionPermissionFilter(Permission = "common")]
+        public async Task<IActionResult> Messages(long sessionId)
+        {
+            try
+            {
+                var userId = HttpContext.GetUId();
+                return SUCCESS(await _aiChatService.GetMessagesAsync(sessionId, userId));
+            }
+            catch (Exception ex)
+            {
+                return ToResponse(ResultCode.FAIL, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// 发送对话消息（SessionId 传 0 自动新建会话；内部自动调用工具）
+        /// </summary>
+        [HttpPost("chat")]
+        [ActionPermissionFilter(Permission = "common")]
+        public async Task<IActionResult> Chat([FromBody] SysAiChatRequestDto parm)
+        {
+            if (parm == null || string.IsNullOrWhiteSpace(parm.Message))
+            {
+                return ToResponse(ResultCode.FAIL, "消息内容不能为空");
+            }
+            try
+            {
+                var userId = HttpContext.GetUId();
+                return SUCCESS(await _aiChatService.ChatAsync(parm.SessionId, userId, parm.Message));
+            }
+            catch (Exception ex)
+            {
+                return ToResponse(ResultCode.FAIL, ex.Message);
+            }
+        }
+
+        /// <summary>
+        /// 流式对话（SSE，text/event-stream）。入参与 Chat 一致，事件协议见 SysAiChatStreamDto：
+        /// delta=增量文本（打字机效果）、tool=工具执行状态(start|done)、done=整轮结束(含落库结果与图表)、error=异常终止。
+        /// </summary>
+        [HttpPost("chat/stream")]
+        [ActionPermissionFilter(Permission = "common")]
+        public async Task ChatStream([FromBody] SysAiChatRequestDto parm)
+        {
+            if (parm == null || string.IsNullOrWhiteSpace(parm.Message))
+            {
+                Response.StatusCode = StatusCodes.Status400BadRequest;
+                await Response.WriteAsync("{\"msg\":\"消息内容不能为空\"}", HttpContext.RequestAborted);
+                return;
+            }
+            var userId = HttpContext.GetUId();
+            var aborted = HttpContext.RequestAborted;
+            // SSE 响应：关闭代理缓冲，保证逐块实时推送
+            Response.ContentType = "text/event-stream; charset=utf-8";
+            Response.Headers.CacheControl = "no-cache";
+            Response.Headers.Append("Connection", "keep-alive");
+            Response.Headers["X-Accel-Buffering"] = "no";
+
+            // 响应体写串行化：心跳任务与主事件流共用同一响应流，防交错
+            using var gate = new SemaphoreSlim(1, 1);
+            using var pingCts = CancellationTokenSource.CreateLinkedTokenSource(aborted);
+
+            // 写原始 SSE 文本（data 行 / 心跳注释行），带锁 + 逐次 flush
+            async Task WriteRawAsync(string sseText, CancellationToken ct)
+            {
+                await gate.WaitAsync(ct);
+                try
+                {
+                    await Response.WriteAsync(sseText, ct);
+                    await Response.Body.FlushAsync(ct);
+                }
+                finally
+                {
+                    gate.Release();
+                }
+            }
+
+            // 序列化 DTO 为 data 事件写出
+            async Task WriteEventAsync(SysAiChatStreamDto evt, CancellationToken ct)
+            {
+                var json = JsonSerializer.Serialize(evt, SseJsonOptions);
+                await WriteRawAsync($"data: {json}\n\n", ct);
+            }
+
+            // 20s 心跳：Nginx proxy_read_timeout 默认按"两次读取间空闲时长"掐连接，
+            // 工具执行/模型换轮等停顿段没有数据，需心跳保活整条链路（独立于主事件循环）。
+            var pingTask = Task.Run(async () =>
+            {
+                try
+                {
+                    while (!pingCts.IsCancellationRequested)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(20), pingCts.Token);
+                        await WriteRawAsync(": ping\n\n", pingCts.Token);
+                    }
+                }
+                catch (OperationCanceledException) { } // 正常结束/客户端断开
+                catch (IOException) { }                // 连接中断
+                catch (Exception ex)
+                {
+                    _logger.Error($"AI SSE 心跳写入失败：{ex.Message}");
+                }
+            }, aborted);
+
+            try
+            {
+                await foreach (var evt in _aiChatService.StreamChatAsync(parm.SessionId, userId, parm.Message))
+                {
+                    await WriteEventAsync(evt, aborted);
+                }
+                // done 事件由 StreamChatAsync 末尾 yield 的 done chunk 统一发出，无需在此补发
+            }
+            catch (OperationCanceledException) { } // 客户端断开/请求取消：静默收尾
+            catch (IOException) { }                // 连接中断：静默收尾（不写 error 事件）
+            catch (Exception ex)
+            {
+                _logger.Error($"AI 流式对话异常 sessionId={parm.SessionId} userId={userId} msg={AiHelper.ClipText(parm.Message, 200)} err={ex}");
+                try
+                {
+                    await WriteEventAsync(new SysAiChatStreamDto { Type = "error", Error = ex.Message }, aborted);
+                }
+                catch
+                {
+                    // 写入失败（客户端已断开）则忽略
+                }
+            }
+            finally
+            {
+                // 停心跳并等它退出，避免 using 释放 gate/pingCts 时仍有写入
+                pingCts.Cancel();
+                try { await pingTask; } catch { /* pingTask 内部已兜底，正常不会抛出 */ }
+            }
+        }
+
+        private static readonly JsonSerializerOptions SseJsonOptions = new()
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        };
+    }
+}

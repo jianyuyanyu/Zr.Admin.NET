@@ -1,8 +1,13 @@
 using Infrastructure.AI;
 using Infrastructure.Attribute;
+using Infrastructure.Model;
 using Microsoft.IdentityModel.Tokens;
 using Newtonsoft.Json.Linq;
 using NLog;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Runtime.CompilerServices;
+using System.Text;
 using ZR.Model.AI;
 using ZR.Model.AI.Dto;
 using ZR.Model.System.Dto;
@@ -309,6 +314,166 @@ namespace ZR.ServiceCore.AI
             // 4. 落库 + 会话元信息维护
             return await FinishTurnAsync(session, isNewSession, userId, message, reply, model,
                 hasUsage, totalPromptTokens, totalCompletionTokens, totalTokens, charts);
+        }
+
+        /// <summary>
+        /// 流式对话（SSE 事件流）：与 ChatAsync 编排完全一致（同一套系统提示/历史/工具/落库/图表），
+        /// 仅模型调用走 stream=true。事件类型见 SysAiChatStreamDto：
+        /// delta=模型增量文本（实时推送）；tool=工具执行开始/结束；done=整轮结束（含落库结果）。
+        /// 模型/业务异常直接向上抛出，由调用方转为 error 事件；成功流必有最后一个 done 事件。
+        /// </summary>
+        public async IAsyncEnumerable<SysAiChatStreamDto> StreamChatAsync(long sessionId, long userId, string message)
+        {
+            message = (message ?? "").Trim();
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                throw new Exception("消息内容不能为空");
+            }
+            var options = AiHelper.EnsureAiEnabled();
+            var resolved = AiLlmClient.ResolveProvider(options);
+            var model = string.IsNullOrWhiteSpace(resolved.Model) ? options.Model : resolved.Model;
+
+            // 1. 会话归属
+            var isNewSession = sessionId <= 0;
+            AiChatSession session;
+            if (isNewSession)
+            {
+                session = new AiChatSession { UserId = userId, Title = "新对话" };
+                session.SessionId = await Context.Insertable(session).ExecuteReturnSnowflakeIdAsync();
+            }
+            else
+            {
+                session = await Queryable()
+                    .Where(m => m.SessionId == sessionId && m.UserId == userId)
+                    .FirstAsync() ?? throw new Exception("会话不存在或无权访问");
+            }
+
+            // 2. 组装消息（系统提示 + 历史 + 当前提问）
+            var messages = new List<object>
+            {
+                new { role = "system", content = BuildSystemPrompt(userId) }
+            };
+            var history = await Context.Queryable<AiChatMessage>()
+                .Where(m => m.SessionId == session.SessionId && m.UserId == userId && m.Role != "tool")
+                .OrderBy(m => m.CreateTime, OrderByType.Desc)
+                .Take(MaxHistoryMessages)
+                .ToListAsync();
+            history.Reverse();// 历史按时间正序回灌
+            foreach (var h in history)
+            {
+                messages.Add(new { role = h.Role, content = AiHelper.ClipText(h.Content, 2000) });
+            }
+            messages.Add(new { role = "user", content = message });
+
+            // 3. 工具调用编排（流式）
+            var tools = BuildToolObjects();
+            string reply = "";
+            var chartQueries = new List<AiChartQueryResult>();
+            var roundDiag = new List<string>();
+            var hasUsage = false;
+            int totalPromptTokens = 0, totalCompletionTokens = 0, totalTokens = 0;
+            for (var round = 0; round < MaxToolRounds; round++)
+            {
+                AiLlmClient.ChatToolResult turn = null;
+                // 模型流式调用：逐块转发增量文本，结束时聚合出本轮完整结果。
+                // 注意：迭代段内不得被 try/catch 包裹（含 yield return），异常向上冒出由调用方转 error 事件。
+                await foreach (var chunk in AiLlmClient.StreamChatWithToolsAsync(options, messages.ToArray(), tools, "ai_chat"))
+                {
+                    if (chunk.Type == "delta" && !string.IsNullOrEmpty(chunk.Text))
+                    {
+                        yield return new SysAiChatStreamDto { Type = "delta", Content = chunk.Text };
+                    }
+                    else if (chunk.Type == "finish")
+                    {
+                        turn = chunk.Result;
+                    }
+                }
+                if (turn == null)
+                {
+                    throw new HttpRequestException("AI 服务未返回有效响应，请重试");
+                }
+                // 一次对话可能多次调用模型，累计本轮用量便于回填消息级 token
+                totalPromptTokens += turn.PromptTokens;
+                totalCompletionTokens += turn.CompletionTokens;
+                totalTokens += turn.TotalTokens;
+                if (totalTokens > 0) hasUsage = true;
+                var contentLen = turn.Content?.Length ?? 0;
+                var toolNames = turn.ToolCalls?.Select(x => x.Name) ?? new List<string>();
+                roundDiag.Add($"r{round + 1}:finish={turn.FinishReason ?? "null"},contentLen={contentLen},tools=[{string.Join(",", toolNames)}]");
+
+                if (turn.ToolCalls == null || turn.ToolCalls.Count == 0)
+                {
+                    reply = turn.Content ?? "";
+                    break;
+                }
+                // 记录 assistant 的工具调用请求
+                messages.Add(new
+                {
+                    role = "assistant",
+                    content = turn.Content ?? "",
+                    tool_calls = turn.ToolCalls.Select(c => new
+                    {
+                        id = c.Id,
+                        type = "function",
+                        function = new { name = c.Name, arguments = c.Arguments }
+                    }).ToArray()
+                });
+                // 逐条执行工具并把结果回灌
+                foreach (var call in turn.ToolCalls)
+                {
+                    yield return new SysAiChatStreamDto { Type = "tool", ToolName = call.Name, ToolStatus = "start" };
+                    AiToolExecResult exec;
+                    try
+                    {
+                        exec = await ExecuteToolAsync(call.Name, call.Arguments, userId, session.SessionId);
+                    }
+                    catch (Exception ex)
+                    {
+                        // 详情只写后端日志便于排查；回灌给模型的是通用失败提示，
+                        // 避免把内部异常细节经模型转述暴露给前端。
+                        _logger.Error($"AI 工具执行异常 tool={call.Name} args={AiHelper.ClipText(call.Arguments ?? "", 300)} err={ex}");
+                        exec = AiToolExecResult.Error("该操作执行失败，请告知用户稍后重试");
+                    }
+                    yield return new SysAiChatStreamDto { Type = "tool", ToolName = call.Name, ToolStatus = "done", ToolOk = exec.Ok };
+                    var content = exec.Content ?? "";
+                    if (!exec.Ok)
+                    {
+                        content = $"[错误] {content}";
+                    }
+                    else if (exec.ChartQuery != null)
+                    {
+                        chartQueries.Add(exec.ChartQuery);
+                    }
+                    messages.Add(new { role = "tool", tool_call_id = call.Id, content = AiHelper.ClipText(content, ToolResultMaxLen) });
+                }
+            }
+            if (string.IsNullOrWhiteSpace(reply))
+            {
+                _logger.Error($"AI 回复为空(触发兜底文案) userId={userId} sessionId={session.SessionId} model={model} " +
+                    $"msg={AiHelper.ClipText(message, 200)} history={history.Count} rounds={string.Join(" | ", roundDiag)}");
+                reply = "抱歉，我这边没有正常生成回答，请重新描述一下你的问题。";
+            }
+
+            var assembled = AiChartAssembler.Assemble(reply, chartQueries);
+            reply = assembled.Reply;
+            var charts = assembled.Charts;
+
+            // 4. 落库 + 会话元信息维护
+            var result = await FinishTurnAsync(session, isNewSession, userId, message, reply, model,
+                hasUsage, totalPromptTokens, totalCompletionTokens, totalTokens, charts);
+            yield return new SysAiChatStreamDto
+            {
+                Type = "done",
+                SessionId = result.SessionId,
+                Title = result.Title,
+                Model = result.Model,
+                Reply = result.Reply,
+                IsNewSession = result.IsNewSession,
+                PromptTokens = result.PromptTokens,
+                CompletionTokens = result.CompletionTokens,
+                TotalTokens = result.TotalTokens,
+                Charts = result.Charts
+            };
         }
 
         private async Task SaveMessageAsync(long sessionId, long userId, string role, string content, string model,

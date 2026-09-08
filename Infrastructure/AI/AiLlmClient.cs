@@ -2,8 +2,10 @@ using Infrastructure.Model;
 using Microsoft.Extensions.Logging;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 
@@ -416,6 +418,241 @@ namespace Infrastructure.AI
                 Logger.LogWarning(ex, "解析 AI tool 响应失败，按纯文本处理");
                 return new ChatToolResult { Content = responseText };
             }
+        }
+
+        /// <summary>
+        /// 流式(SSE)返回事件：delta=本轮文本增量（供打字机实时展示）；
+        /// finish=本轮结束，Result 为与 ChatWithToolsAsync 同构的聚合结果。
+        /// </summary>
+        public sealed class AiStreamChunk
+        {
+            public string Type { get; set; }
+            public string Text { get; set; }
+            public ChatToolResult Result { get; set; }
+        }
+
+        /// <summary>
+        /// 流式(SSE)版 ChatWithToolsAsync：OpenAI 兼容 stream=true 的"单轮"对话。
+        /// 上层自行控制纠错轮次与工具结果回灌（每轮迭代到 finish 后判断 ToolCalls）。
+        /// 迭代中逐块 yield delta；HTTP/解析/服务错误直接抛 HttpRequestException，由上层决定展示策略。
+        /// </summary>
+        public static async IAsyncEnumerable<AiStreamChunk> StreamChatWithToolsAsync(AiOptions options, object[] messages, object[] tools, string scene = null)
+        {
+            var resolved = ResolveProvider(options);
+            var uri = BuildRequestUri(options);
+            var payload = new Dictionary<string, object>
+            {
+                ["model"] = resolved.Model,
+                ["messages"] = messages,
+                ["tools"] = tools,
+                ["tool_choice"] = "auto",
+                ["temperature"] = options.Temperature,
+                ["max_tokens"] = options.MaxTokens,
+                ["stream"] = true,
+                // OpenAI 兼容协议：流式默认不回传 usage，须显式声明才能在最后一个分片拿到 token 用量
+                ["stream_options"] = new Dictionary<string, object> { ["include_usage"] = true }
+            };
+            ApplyThinkingOptions(payload, resolved.Provider, options.EnableThinking);
+
+            var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+            });
+            var headers = new Dictionary<string, string>
+            {
+                ["Authorization"] = "Bearer " + (resolved.ApiKey ?? string.Empty)
+            };
+
+            using var streamResp = await HttpHelper.HttpPostReadStreamAsync(uri.ToString(), json, "application/json", options.TimeoutSeconds, headers);
+            var response = streamResp.Response;
+            if (!response.IsSuccessStatusCode)
+            {
+                var errBody = await response.Content.ReadAsStringAsync(streamResp.Token);
+                Logger.LogError("AI 流式请求失败 status={Status} uri={Uri} model={Model} body={Body}",
+                    (int)response.StatusCode, uri, resolved.Model, TruncateForLog(errBody, 400));
+                // 与 ChatWithToolsAsync 的 EnsureNoProviderError 对齐：细节只写日志，上抛固定文案
+                throw new HttpRequestException("AI 服务调用失败，请稍后重试或检查 AI 配置");
+            }
+
+            var content = new StringBuilder();
+            string finishReason = null;
+            var toolAcc = new Dictionary<int, ToolCallBuilder>();
+            var promptTokens = 0;
+            var completionTokens = 0;
+            var totalTokens = 0;
+
+            await using var stream = await response.Content.ReadAsStreamAsync(streamResp.Token);
+            var buffer = new byte[8192];
+            var lineBytes = new MemoryStream();
+            var done = false;
+            while (!done)
+            {
+                int read;
+                try
+                {
+                    read = await stream.ReadAsync(buffer, 0, buffer.Length, streamResp.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    throw new HttpRequestException("AI 流式响应超时，连接已中断，请重试");
+                }
+                if (read <= 0) break;
+
+                for (var i = 0; i < read && !done; i++)
+                {
+                    if (buffer[i] == (byte)'\n')
+                    {
+                        var line = Encoding.UTF8.GetString(lineBytes.GetBuffer(), 0, (int)lineBytes.Length).Trim();
+                        lineBytes.SetLength(0);
+                        if (line.Length == 0) continue;
+
+                        var data = line;
+                        if (data.StartsWith("data:", StringComparison.OrdinalIgnoreCase)) data = data.Substring(5).Trim();
+                        if (data.Length == 0 || data.StartsWith(":")) continue;
+                        if (data == "[DONE]")
+                        {
+                            done = true;
+                            break;
+                        }
+
+                        if (data.StartsWith("{") || data.StartsWith("["))
+                        {
+                            JsonDocument doc;
+                            try
+                            {
+                                doc = JsonDocument.Parse(data);
+                            }
+                            catch (JsonException)
+                            {
+                                // 个别不完整块忽略，等待后续行
+                                continue;
+                            }
+                            using (doc)
+                            {
+                                var root = doc.RootElement;
+                                if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("error", out _))
+                                {
+                                    var msg = TryReadProviderErrorMessage(data);
+                                    Logger.LogError("AI 流式返回错误：{Message}", msg);
+                                    throw new HttpRequestException("AI 服务调用失败，请稍后重试或检查 AI 配置");
+                                }
+
+                                // usage 可能在最后一块与 choices 同场，或独立成块；后到覆盖
+                                var (p, c, t) = ReadUsageTokens(root, resolved.Provider);
+                                if (p > 0) promptTokens = p;
+                                if (c > 0) completionTokens = c;
+                                if (t > 0) totalTokens = t;
+
+                                if (!root.TryGetProperty("choices", out var choices) || choices.ValueKind != JsonValueKind.Array || choices.GetArrayLength() == 0)
+                                {
+                                    continue;
+                                }
+                                var choice = choices[0];
+
+                                if (choice.TryGetProperty("finish_reason", out var frEl) && frEl.ValueKind == JsonValueKind.String)
+                                {
+                                    var frVal = frEl.GetString();
+                                    if (!string.IsNullOrWhiteSpace(frVal)) finishReason = frVal;
+                                }
+
+                                if (!choice.TryGetProperty("delta", out var delta) || delta.ValueKind != JsonValueKind.Object)
+                                {
+                                    continue;
+                                }
+
+                                if (delta.TryGetProperty("content", out var cEl) && cEl.ValueKind == JsonValueKind.String)
+                                {
+                                    var txt = cEl.GetString() ?? string.Empty;
+                                    if (txt.Length > 0)
+                                    {
+                                        content.Append(txt);
+                                        yield return new AiStreamChunk { Type = "delta", Text = txt };
+                                    }
+                                }
+
+                                if (delta.TryGetProperty("tool_calls", out var tcs) && tcs.ValueKind == JsonValueKind.Array)
+                                {
+                                    foreach (var tc in tcs.EnumerateArray())
+                                    {
+                                        var idx = 0;
+                                        if (tc.TryGetProperty("index", out var idxEl) && idxEl.TryGetInt32(out var idxVal)) idx = idxVal;
+                                        if (!toolAcc.TryGetValue(idx, out var acc))
+                                        {
+                                            acc = new ToolCallBuilder();
+                                            toolAcc[idx] = acc;
+                                        }
+                                        if (tc.TryGetProperty("id", out var idEl) && idEl.ValueKind == JsonValueKind.String)
+                                        {
+                                            var idVal = idEl.GetString();
+                                            if (!string.IsNullOrWhiteSpace(idVal)) acc.Id = idVal;
+                                        }
+                                        if (tc.TryGetProperty("function", out var fn) && fn.ValueKind == JsonValueKind.Object)
+                                        {
+                                            // OpenAI 规范：function.name 仅出现在首个 fragment，且为完整名
+                                            if (string.IsNullOrEmpty(acc.Name)
+                                                && fn.TryGetProperty("name", out var nEl) && nEl.ValueKind == JsonValueKind.String)
+                                            {
+                                                var nameVal = nEl.GetString();
+                                                if (!string.IsNullOrWhiteSpace(nameVal)) acc.Name = nameVal;
+                                            }
+                                            if (fn.TryGetProperty("arguments", out var aEl) && aEl.ValueKind == JsonValueKind.String)
+                                            {
+                                                acc.Args.Append(aEl.GetString());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // 非标准纯文本流兜底：整行作为文本增量输出
+                            content.Append(data);
+                            yield return new AiStreamChunk { Type = "delta", Text = data };
+                        }
+                    }
+                    else
+                    {
+                        lineBytes.WriteByte(buffer[i]);
+                    }
+                }
+            }
+
+            var toolCalls = toolAcc.Values
+                .Where(b => !string.IsNullOrWhiteSpace(b.Name) || b.Args.Length > 0)
+                .Select(b => new ToolCall { Id = b.Id, Name = b.Name, Arguments = b.Args.ToString() })
+                .ToList();
+
+            Logger.LogInformation("AI token usage [provider={Provider}, model={Model}, scene={Scene}] 输入(prompt)={PromptTokens} 输出(completion)={CompletionTokens} 合计(total)={TotalTokens}",
+                resolved.Provider, resolved.Model, scene, promptTokens, completionTokens, totalTokens);
+            ReportUsage(scene, resolved.Provider, resolved.Model, promptTokens, completionTokens, totalTokens);
+
+            var result = new ChatToolResult
+            {
+                Content = content.ToString(),
+                ToolCalls = toolCalls,
+                FinishReason = finishReason,
+                PromptTokens = promptTokens,
+                CompletionTokens = completionTokens,
+                TotalTokens = totalTokens
+            };
+
+            if (string.IsNullOrWhiteSpace(result.Content) && (result.ToolCalls == null || result.ToolCalls.Count == 0))
+            {
+                Logger.LogError("AI 流式响应无可用内容（无 content 且无 tool_calls）。uri={Uri}, model={Model}", uri, resolved.Model);
+                throw new HttpRequestException("AI 服务返回了无法解析的响应，请稍后重试或联系管理员");
+            }
+            yield return new AiStreamChunk { Type = "finish", Result = result };
+        }
+
+        /// <summary>
+        /// 流式 tool_calls 分片累积器：OpenAI 兼容 SSE 按 index 分片推送，name/arguments 可能跨块拼接。
+        /// </summary>
+        private sealed class ToolCallBuilder
+        {
+            public string Id { get; set; }
+            public string Name { get; set; }
+            public readonly StringBuilder Args = new StringBuilder();
         }
 
         private static string TruncateForLog(string text, int maxLen)
