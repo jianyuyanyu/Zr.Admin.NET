@@ -107,6 +107,63 @@ namespace ZR.Model.System.Dto
     }
 
     /// <summary>
+    /// 操作日志的可选统计维度。同一份操作日志数据的不同切片，
+    /// 由图表数据集以 dimension 参数切换，Key 同时作为该类目字段名。
+    /// </summary>
+    public static class OperDimensionKinds
+    {
+        /// <summary>按操作模块（SysOperLog.Title）</summary>
+        public const string Module = "module";
+
+        /// <summary>按操作类型（BusinessType 中文名）</summary>
+        public const string Type = "type";
+
+        /// <summary>按操作人（SysOperLog.OperName）</summary>
+        public const string User = "user";
+
+        /// <summary>按风险等级（由 BusinessType 推导的高/中/低危）</summary>
+        public const string Risk = "risk";
+
+        /// <summary>默认维度</summary>
+        public const string Default = Module;
+
+        /// <summary>归一化维度取值，非法或空返回默认维度</summary>
+        public static string Normalize(string dimension)
+        {
+            if (string.IsNullOrWhiteSpace(dimension))
+            {
+                return Default;
+            }
+            var value = dimension.Trim().ToLowerInvariant();
+            return value switch
+            {
+                Module or Type or User or Risk => value,
+                // 兼容模型可能传的中文/别称
+                "模块" or "操作模块" => Module,
+                "类型" or "操作类型" or "业务类型" => Type,
+                "人" or "用户" or "操作人" or "操作人员" => User,
+                "风险" or "风险等级" or "风险级别" => Risk,
+                _ => Default
+            };
+        }
+    }
+
+    /// <summary>
+    /// 操作日志按维度聚合的单项（维度见 OperDimensionKinds，如模块/操作类型/操作人/风险等级）
+    /// </summary>
+    public class OperDimensionStat
+    {
+        /// <summary>维度名称（模块名/操作类型中文名/操作人/风险等级）</summary>
+        public string Name { get; set; }
+
+        /// <summary>操作次数</summary>
+        public long Total { get; set; }
+
+        /// <summary>其中失败次数（Status=1）</summary>
+        public long Errors { get; set; }
+    }
+
+    /// <summary>
     /// 登录日志按省份（IP 解析出的地域）统计。
     /// Region 为省级名称（如"河南省""天津市"），无法解析时归入"未知"。
     /// </summary>

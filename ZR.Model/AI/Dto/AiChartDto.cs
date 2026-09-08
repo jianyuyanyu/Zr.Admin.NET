@@ -9,6 +9,19 @@ namespace ZR.Model.AI.Dto
         public string Kind { get; set; }
     }
 
+    /// <summary>图表数据集的一个统计维度（同一份数据的不同切片）</summary>
+    public class AiChartDimension
+    {
+        /// <summary>维度 Key，模型传 dimension 时使用；同时作为该类目字段名</summary>
+        public string Key { get; set; }
+
+        /// <summary>维度中文名，用于工具描述与图表标题</summary>
+        public string Label { get; set; }
+
+        /// <summary>什么问题时该选这个维度，帮助模型判断</summary>
+        public string Hint { get; set; }
+    }
+
     /// <summary>单条系列配置（AI 产出，后端校验）</summary>
     public class AiChartSeriesSpec
     {

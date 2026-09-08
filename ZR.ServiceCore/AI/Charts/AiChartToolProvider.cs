@@ -25,16 +25,56 @@ namespace ZR.ServiceCore.AI.Charts
 
         public AiChartToolProvider(
             IEnumerable<IAiChartDatasetProvider> datasets,
+            AiChartMetricExecutor metricExecutor,
             ISysPermissionService permissionService)
         {
-            _datasets = datasets?.ToList() ?? [];
             _permissionService = permissionService;
+            _datasets = MergeDatasets(datasets, metricExecutor);
+        }
+
+        /// <summary>代码插件 + 配置目录；同一 datasetId 以插件为准并打日志。</summary>
+        private IReadOnlyList<IAiChartDatasetProvider> MergeDatasets(
+            IEnumerable<IAiChartDatasetProvider> datasets, AiChartMetricExecutor metricExecutor)
+        {
+            var list = new List<IAiChartDatasetProvider>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var d in datasets ?? [])
+            {
+                if (d == null || string.IsNullOrWhiteSpace(d.DatasetId))
+                {
+                    continue;
+                }
+                if (!seen.Add(d.DatasetId))
+                {
+                    _logger.Warn("重复的图表插件 datasetId={0}，已忽略后者", d.DatasetId);
+                    continue;
+                }
+                list.Add(d);
+            }
+            foreach (var def in AiChartMetricCatalog.All)
+            {
+                if (def == null || string.IsNullOrWhiteSpace(def.DatasetId))
+                {
+                    continue;
+                }
+                if (!seen.Add(def.DatasetId))
+                {
+                    _logger.Warn("配置指标 datasetId={0} 与代码插件冲突，已忽略配置项", def.DatasetId);
+                    continue;
+                }
+                list.Add(new CatalogChartDatasetAdapter(def, metricExecutor));
+            }
+            return list;
         }
 
         public List<AiToolDef> GetToolDefs()
         {
             var catalog = string.Join("；", _datasets.Select(d =>
-                $"{d.DatasetId}（{d.Title}，粒度 {string.Join("/", d.Grains)}，图 {string.Join("/", d.AllowedTypes)}：{d.Description}）"));
+                $"{d.DatasetId}（{d.Title}，粒度 {string.Join("/", d.Grains)}，图 {string.Join("/", d.AllowedTypes)}"
+                + (d.Dimensions is { Count: > 0 }
+                    ? $"，维度 {string.Join("/", d.Dimensions.Select(x => x.Key + "(" + x.Label + ")"))}"
+                    : "")
+                + $"：{d.Description}）"));
             if (string.IsNullOrEmpty(catalog))
             {
                 catalog = "当前未注册任何图表数据集";
@@ -48,13 +88,16 @@ namespace ZR.ServiceCore.AI.Charts
                     Description = "查询后台预注册的聚合图表数据（折线/柱状/饼图）。禁止用于任意表查询或写 SQL。"
                         + "不传 datasetId 时返回当前用户有权的数据集清单。"
                         + "已注册：" + catalog
-                        + "。适用于“趋势图/对比/最近N天登录量/画个折线图”等。查到数据后，最终回复须追加 ```zr-chart 配置块（只填 type/title/xField/series，不要改数据行）。",
+                        + "。适用于“趋势图/对比/最近N天登录量/画个折线图”等。"
+                        + "数据集声明了维度（上述 catalog 含“维度”字样）时，用 dimension 参数按某维度切片，如 oper 可按 module/type/user/risk 切。"
+                        + "查到数据后，最终回复须追加 ```zr-chart 配置块（只填 type/title/xField/series，不要改数据行）。",
                     Parameters = new
                     {
                         type = "object",
                         properties = new Dictionary<string, object>
                         {
                             ["datasetId"] = new { type = "string", description = "数据集 Id，如 login_daily；省略则只列出清单" },
+                            ["dimension"] = new { type = "string", description = "统计维度 Key（仅对 catalog 中带“维度”字样的数据集有效），如 oper 可传 module/type/user/risk；不传用默认维度" },
                             ["days"] = new { type = "integer", description = "day/week 粒度的天数，默认 7，最大以数据集为准（通常 90）" },
                             ["months"] = new { type = "integer", description = "month 粒度的月数，默认 12，最大通常 24" },
                             ["grain"] = new { type = "string", description = "时间粒度 day|week|month，默认 day" },
@@ -110,7 +153,8 @@ namespace ZR.ServiceCore.AI.Charts
 
             var grain = NormalizeGrain(args["grain"]?.Value<string>(), provider);
             var (begin, end, rangeNote) = ResolveRange(args, grain, provider);
-            var result = await provider.QueryAsync(userId, begin, end, grain);
+            var dimension = NormalizeDimension(args["dimension"]?.Value<string>(), provider);
+            var result = await provider.QueryAsync(userId, begin, end, grain, dimension);
             var chartType = args["chartType"]?.Value<string>()?.Trim()?.ToLowerInvariant();
             if (!string.IsNullOrEmpty(chartType) && provider.AllowedTypes.Contains(chartType))
             {
@@ -137,8 +181,11 @@ namespace ZR.ServiceCore.AI.Charts
             var sb = new StringBuilder("你可查询的图表数据集：\n");
             foreach (var d in allowed)
             {
+                var dims = d.Dimensions is { Count: > 0 }
+                    ? $"，维度 {string.Join("/", d.Dimensions.Select(x => x.Key + "(" + x.Label + ")"))}"
+                    : "";
                 sb.AppendLine(
-                    $"- {d.DatasetId}：{d.Title}。{d.Description} 粒度 {string.Join("/", d.Grains)}，图 {string.Join("/", d.AllowedTypes)}，字段 {string.Join(",", d.Fields.Select(f => f.Field + "(" + f.Label + ")"))}");
+                    $"- {d.DatasetId}：{d.Title}。{d.Description} 粒度 {string.Join("/", d.Grains)}，图 {string.Join("/", d.AllowedTypes)}，字段 {string.Join(",", d.Fields.Select(f => f.Field + "(" + f.Label + ")"))}{dims}");
             }
             sb.Append("选一个 datasetId 再次调用本工具查询数据。未列出的业务（如充值）表示尚未注册，请到对应模块查看，不要写 SQL。");
             return sb.ToString();
@@ -175,6 +222,19 @@ namespace ZR.ServiceCore.AI.Charts
                 return provider.Grains.FirstOrDefault() ?? "day";
             }
             return grain;
+        }
+
+        private static string NormalizeDimension(string dimension, IAiChartDatasetProvider provider)
+        {
+            if (string.IsNullOrWhiteSpace(dimension) || provider.Dimensions is not { Count: > 0 })
+            {
+                return null;
+            }
+            var value = dimension.Trim();
+            // 大小写不敏感的 Key 命中则规范回原 Key；其余（含中文别名）透传给数据集归一化
+            var hit = provider.Dimensions.FirstOrDefault(x =>
+                string.Equals(x.Key, value, StringComparison.OrdinalIgnoreCase));
+            return hit?.Key ?? value;
         }
 
         private static (DateTime begin, DateTime end, string note) ResolveRange(JObject args, string grain, IAiChartDatasetProvider provider)

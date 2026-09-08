@@ -27,6 +27,12 @@ namespace ZR.ServiceCore.Services
         /// <summary>慢操作统计的最小调用次数门槛，避免偶发慢查询刷榜</summary>
         private const int MinSlowOperCount = 3;
 
+        /// <summary>维度聚合中空模块/空操作人的展示名</summary>
+        private const string UnknownDimensionName = "未知";
+
+        /// <summary>维度聚合中长尾合并项的展示名</summary>
+        private const string OtherDimensionName = "其他";
+
         /// <summary>
         /// 新增操作日志操作
         /// </summary>
@@ -248,6 +254,158 @@ namespace ZR.ServiceCore.Services
                 .Where(it => it.OperTime >= begin && it.OperTime <= end)
                 .WhereIF(!string.IsNullOrEmpty(operName), it => it.OperName == operName);
         }
+
+        /// <summary>
+        /// 按维度聚合操作日志（供 AI 图表问答，不返回原始日志）。
+        /// 模块/操作人基数可能很大，统一按 TopN 截断并把长尾合并为"其他"；
+        /// 操作类型最多 11 种、风险等级固定 3 档，无需合并。
+        /// </summary>
+        public List<OperDimensionStat> GetOperDimensionStats(LogAiAnalysisInput input, string dimension, string operName = null, int topN = 12)
+        {
+            input ??= new LogAiAnalysisInput();
+            var (begin, end) = input.ResolveRange();
+            var kind = OperDimensionKinds.Normalize(dimension);
+
+            if (kind == OperDimensionKinds.Risk)
+            {
+                // 风险等级由 BusinessType 推导，先按类型聚合再内存归并到三档
+                var byType = GroupByBusinessType(begin, end, operName);
+                return byType
+                    .GroupBy(x => DescribeRiskLevel(x.BusinessType))
+                    .Select(g => new OperDimensionStat
+                    {
+                        Name = g.Key,
+                        Total = g.Sum(x => x.Total),
+                        Errors = g.Sum(x => x.Errors)
+                    })
+                    .OrderBy(x => RiskLevelOrder(x.Name))
+                    .ToList();
+            }
+
+            List<OperDimensionStat> stats;
+            if (kind == OperDimensionKinds.Type)
+            {
+                stats = GroupByBusinessType(begin, end, operName)
+                    .Select(x => new OperDimensionStat
+                    {
+                        Name = DescribeBusinessType(x.BusinessType),
+                        Total = x.Total,
+                        Errors = x.Errors
+                    })
+                    .ToList();
+            }
+            else
+            {
+                // 操作人/模块按各自字段分组（匿名 lambda 无法推断条件类型，拆成两次 GroupBy）
+                if (kind == OperDimensionKinds.User)
+                {
+                    stats = BuildRangeQuery(begin, end, operName)
+                        .GroupBy(it => it.OperName)
+                        .Select(it => new
+                        {
+                            Name = it.OperName,
+                            Total = SqlFunc.AggregateCount(it.OperId),
+                            Errors = SqlFunc.AggregateSum(SqlFunc.IIF(it.Status == 1, 1, 0))
+                        })
+                        .ToList()
+                        .Select(x => new OperDimensionStat
+                        {
+                            Name = string.IsNullOrWhiteSpace(x.Name) ? UnknownDimensionName : x.Name,
+                            Total = x.Total,
+                            Errors = x.Errors
+                        })
+                        .ToList();
+                }
+                else
+                {
+                    stats = BuildRangeQuery(begin, end, operName)
+                        .GroupBy(it => it.Title)
+                        .Select(it => new
+                        {
+                            Name = it.Title,
+                            Total = SqlFunc.AggregateCount(it.OperId),
+                            Errors = SqlFunc.AggregateSum(SqlFunc.IIF(it.Status == 1, 1, 0))
+                        })
+                        .ToList()
+                        .Select(x => new OperDimensionStat
+                        {
+                            // 模块可能为空（如无标题的操作），统一显示"未知"
+                            Name = string.IsNullOrWhiteSpace(x.Name) ? UnknownDimensionName : x.Name,
+                            Total = x.Total,
+                            Errors = x.Errors
+                        })
+                        .ToList();
+                }
+            }
+
+            // 风险等级固定 3 档、操作类型最多 11 种，均无需合并长尾
+            if (stats.Count <= topN)
+            {
+                return OrderStats(stats, kind);
+            }
+
+            var ordered = OrderStats(stats, kind);
+            var head = ordered.Take(topN).ToList();
+            var tail = ordered.Skip(topN).ToList();
+            head.Add(new OperDimensionStat
+            {
+                Name = OtherDimensionName,
+                Total = tail.Sum(x => x.Total),
+                Errors = tail.Sum(x => x.Errors)
+            });
+            return head;
+        }
+
+        private List<(int BusinessType, int Total, int Errors)> GroupByBusinessType(
+            DateTime begin, DateTime end, string operName)
+        {
+            return BuildRangeQuery(begin, end, operName)
+                .GroupBy(it => it.BusinessType)
+                .Select(it => new
+                {
+                    it.BusinessType,
+                    Total = SqlFunc.AggregateCount(it.OperId),
+                    Errors = SqlFunc.AggregateSum(SqlFunc.IIF(it.Status == 1, 1, 0))
+                })
+                .ToList()
+                .Select(x => (x.BusinessType, x.Total, x.Errors))
+                .ToList();
+        }
+
+        private static List<OperDimensionStat> OrderStats(List<OperDimensionStat> stats, string kind)
+        {
+            // 操作类型按类型编号升序展示（其它→新增→修改→…），比按量排序更稳定易读
+            if (kind == OperDimensionKinds.Type)
+            {
+                return stats.OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase).ToList();
+            }
+            return stats.OrderByDescending(x => x.Total)
+                .ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        /// <summary>
+        /// 风险等级：按操作的影响面与不可逆程度分档。
+        /// 高危=数据不可恢复或影响范围大；中危=涉及数据进出或权限变更；其余为低危。
+        /// </summary>
+        private static string DescribeRiskLevel(int businessType)
+        {
+            return businessType switch
+            {
+                (int)BusinessType.CLEAN or (int)BusinessType.DELETE => "高危",
+                (int)BusinessType.GRANT or (int)BusinessType.EXPORT
+                    or (int)BusinessType.IMPORT or (int)BusinessType.FORCE
+                    or (int)BusinessType.GENCODE => "中危",
+                _ => "低危"
+            };
+        }
+
+        private static int RiskLevelOrder(string level) => level switch
+        {
+            "高危" => 0,
+            "中危" => 1,
+            _ => 2
+        };
 
         /// <summary>
         /// 错误消息归一化：取首行去掉堆栈细节，把数字/GUID 替换为占位符，
