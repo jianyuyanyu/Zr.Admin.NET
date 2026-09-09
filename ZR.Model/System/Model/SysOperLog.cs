@@ -96,6 +96,13 @@
         /// 操作用时
         /// </summary>
         public long Elapsed { get; set; }
+        /// <summary>
+        /// 部门名
+        /// </summary>
         public string DeptName { get; set; }
+        /// <summary>
+        /// 用户Id
+        /// </summary>
+        public long? UserId { get; set; }
     }
 }

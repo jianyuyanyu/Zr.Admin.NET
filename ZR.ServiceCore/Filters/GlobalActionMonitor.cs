@@ -88,6 +88,7 @@ namespace ZR.ServiceCore.Middleware
                     Status = 0,
                     OperName = userName,
                     OperIp = ip,
+                    UserId = context.HttpContext.GetUId(),
                     OperUrl = HttpContextExtension.GetRequestUrl(context.HttpContext),
                     RequestMethod = method,
                     JsonResult = jsonResult,
