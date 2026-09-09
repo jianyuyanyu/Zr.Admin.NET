@@ -61,8 +61,8 @@ builder.Services.AddDataProtection()
 builder.Services.AddCaptchaProvider();
 // 读取额外配置文件（iprate.json 要在注册限流服务之前加载）
 builder.Configuration.AddJsonFile("iprate.json");
-//IPRatelimit
-builder.Services.AddIPRate(builder.Configuration);
+//接口限流（客户端模式：登录用户优先，匿名回退按 IP，规则见 iprate.json）
+builder.Services.AddUserRateLimiting(builder.Configuration);
 //builder.Services.AddSession();
 builder.Services.AddHttpContextAccessor();
 //绑定整个对象到Model上
@@ -214,9 +214,8 @@ if (builder.Environment.IsDevelopment())
     app.UseSwagger();
 }
 
-//启用客户端IP限制速率
-app.UseIpRateLimiting();
-app.UseRateLimiter();
+//启用接口限制速率（客户端模式：登录用户优先，匿名回退按 IP）
+app.UseClientRateLimiting();
 //设置socket连接
 app.MapHub<MessageHub>("/msgHub");
 

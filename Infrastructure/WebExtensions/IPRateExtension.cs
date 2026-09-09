@@ -1,5 +1,4 @@
 ﻿using AspNetCoreRateLimit;
-using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using System;
@@ -8,26 +7,27 @@ namespace ZR.Infrastructure.WebExtensions
 {
     public static class IPRateExtension
     {
-        public static void AddIPRate(this IServiceCollection services, IConfiguration configuration)
+        /// <summary>
+        /// 启用接口限流（客户端模式，计数按“登录用户优先、匿名按 IP”分桶），
+        /// 配置节见 iprate.json 的 ClientRateLimiting。
+        /// </summary>
+        public static void AddUserRateLimiting(this IServiceCollection services, IConfiguration configuration)
         {
             ArgumentNullException.ThrowIfNull(services);
 
-            //从appsettings.json中加载常规配置，IpRateLimiting与配置文件中节点对应
-            services.Configure<IpRateLimitOptions>(configuration.GetSection("IpRateLimiting"));
+            services.AddMemoryCache();
 
-            //从appsettings.json中加载Ip规则
-            services.Configure<IpRateLimitPolicies>(configuration.GetSection("IpRateLimitPolicies"));
+            //从 iprate.json 中加载常规配置，ClientRateLimiting 与配置文件中节点对应
+            services.Configure<ClientRateLimitOptions>(configuration.GetSection("ClientRateLimiting"));
+
+            //从 iprate.json 中加载客户端专项规则（可选，按客户端标识配置）
+            services.Configure<ClientRateLimitPolicies>(configuration.GetSection("ClientRateLimitPolicies"));
             //注入计数器和规则存储
-            services.AddSingleton<IIpPolicyStore, MemoryCacheIpPolicyStore>();
+            services.AddSingleton<IClientPolicyStore, MemoryCacheClientPolicyStore>();
             services.AddSingleton<IRateLimitCounterStore, MemoryCacheRateLimitCounterStore>();
-            //配置（解析器、计数器密钥生成器）
-            services.AddSingleton<IRateLimitConfiguration, RateLimitConfiguration>();
+            //配置（自定义解析器：登录用户优先，匿名按 IP）
+            services.AddSingleton<IRateLimitConfiguration, UserRateLimitConfiguration>();
             services.AddSingleton<IProcessingStrategy, AsyncKeyLockProcessingStrategy>();
-
-            services.AddRateLimiter(limiterOptions =>
-            {
-                // 配置限流策略
-            });
         }
     }
 }

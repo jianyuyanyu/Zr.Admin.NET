@@ -1,12 +1,12 @@
 {
-  //接口请求限制
-  "IpRateLimiting": {
+  //接口请求限制（客户端模式：计数按登录用户 user:{id}，匿名请求回退按客户端 IP ip:{ip}）
+  "ClientRateLimiting": {
     "EnableEndpointRateLimiting": true,
     "StackBlockedRequests": false,
     "RealIpHeader": "X-Real-IP",
     "ClientIdHeader": "X-ClientId",
     "HttpStatusCode": 429,
-    "EndpointWhitelist": [ "post:/system/dict/data/types", "*:/msghub/negotiate", "*:/LogOut", "*:/common/uploadfile", "*:/VerifyScan", "*:/workflow/ai/generate", "*:/workflow/ai/approval-suggest", "*:/workflow/ai/flow-analyze", "*:/workflow/ai/match-fill" ],
+    "EndpointWhitelist": [ "post:/system/dict/data/types", "*:/msghub/negotiate", "*:/LogOut", "*:/common/uploadfile", "*:/VerifyScan" ],
     "QuotaExceededResponse": {
       "Content": "{{\"code\":429,\"msg\":\"访问过于频繁，请稍后重试\"}}",
       "ContentType": "application/json",
