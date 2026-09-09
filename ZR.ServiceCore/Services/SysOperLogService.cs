@@ -110,9 +110,9 @@ namespace ZR.ServiceCore.Services
 
         /// <summary>
         /// 聚合操作日志健康指标供 AI 解读。错误先归一化聚类再交给模型，
-        /// 避免把海量原始错误（含参数、堆栈）直接喂给模型；operName 非空时只统计该用户（非管理员与列表页同口径）。
+        /// 避免把海量原始错误（含参数、堆栈）直接喂给模型；userId 非空时只统计该用户（非管理员口径）。
         /// </summary>
-        public OperHealthMetricsDto GetOperHealthMetrics(LogAiAnalysisInput input, string operName = null)
+        public OperHealthMetricsDto GetOperHealthMetrics(LogAiAnalysisInput input, long? userId = null)
         {
             var (begin, end) = input.ResolveRange();
             var metrics = new OperHealthMetricsDto
@@ -121,15 +121,15 @@ namespace ZR.ServiceCore.Services
             };
             var notes = new List<string>();
 
-            metrics.TotalCount = BuildRangeQuery(begin, end, operName).Count();
-            metrics.ErrorCount = BuildRangeQuery(begin, end, operName).Where(it => it.Status == 1).Count();
-            metrics.NightCount = BuildRangeQuery(begin, end, operName).Where(it => it.OperTime.Value.Hour < 6).Count();
+            metrics.TotalCount = BuildRangeQuery(begin, end, userId).Count();
+            metrics.ErrorCount = BuildRangeQuery(begin, end, userId).Where(it => it.Status == 1).Count();
+            metrics.NightCount = BuildRangeQuery(begin, end, userId).Where(it => it.OperTime.Value.Hour < 6).Count();
 
             // 耗时 P95：数据量过大时放弃计算，宁可缺省也不拖垮查询；
             // 样本行数与计数可能因状态/并发不一致，取到空样本时跳过而不是索引越界
             if (metrics.TotalCount > 0 && metrics.TotalCount <= MaxElapsedSampleRows)
             {
-                var elapsed = BuildRangeQuery(begin, end, operName).Select(it => it.Elapsed).ToList();
+                var elapsed = BuildRangeQuery(begin, end, userId).Select(it => it.Elapsed).ToList();
                 if (elapsed.Count == 0)
                 {
                     notes.Add("未能取到耗时样本，未计算耗时 P95");
@@ -147,7 +147,7 @@ namespace ZR.ServiceCore.Services
             }
 
             // 每日总量/错误量趋势
-            metrics.Daily = BuildRangeQuery(begin, end, operName).GroupBy(it => it.OperTime.Value.ToString("yyyy-MM-dd"))
+            metrics.Daily = BuildRangeQuery(begin, end, userId).GroupBy(it => it.OperTime.Value.ToString("yyyy-MM-dd"))
                 .Select(it => new
                 {
                     Date = it.OperTime.Value.ToString("yyyy-MM-dd"),
@@ -160,7 +160,7 @@ namespace ZR.ServiceCore.Services
                 .ToList();
 
             // 业务类型分布
-            metrics.BusinessTypes = BuildRangeQuery(begin, end, operName).GroupBy(it => it.BusinessType)
+            metrics.BusinessTypes = BuildRangeQuery(begin, end, userId).GroupBy(it => it.BusinessType)
                 .Select(it => new
                 {
                     it.BusinessType,
@@ -178,7 +178,7 @@ namespace ZR.ServiceCore.Services
                 .ToList();
 
             // 慢操作 Top：仅统计调用次数达门槛的操作
-            metrics.SlowOps = BuildRangeQuery(begin, end, operName).GroupBy(it => new { it.Title, it.Method })
+            metrics.SlowOps = BuildRangeQuery(begin, end, userId).GroupBy(it => new { it.Title, it.Method })
                 .Having(it => SqlFunc.AggregateCount(it.OperId) >= MinSlowOperCount)
                 .Select(it => new
                 {
@@ -205,7 +205,7 @@ namespace ZR.ServiceCore.Services
 
             // 敏感操作（删除/导出/强退/清空）Top 账号
             int[] riskTypes = { (int)BusinessType.DELETE, (int)BusinessType.EXPORT, (int)BusinessType.FORCE, (int)BusinessType.CLEAN };
-            metrics.RiskAccounts = BuildRangeQuery(begin, end, operName).Where(it => riskTypes.Contains(it.BusinessType))
+            metrics.RiskAccounts = BuildRangeQuery(begin, end, userId).Where(it => riskTypes.Contains(it.BusinessType))
                 .GroupBy(it => it.OperName)
                 .Select(it => new { Name = it.OperName, Num = SqlFunc.AggregateCount(it.OperId) })
                 .ToList()
@@ -214,7 +214,7 @@ namespace ZR.ServiceCore.Services
                 .ToList();
 
             // 错误聚类：先取最近样本，归一化特征后内存分组，每类只保留一条原始样例
-            var errorRows = BuildRangeQuery(begin, end, operName).Where(it => it.Status == 1)
+            var errorRows = BuildRangeQuery(begin, end, userId).Where(it => it.Status == 1)
                 .OrderByDescending(it => it.OperId)
                 .Take(MaxErrorSampleRows)
                 .Select(it => new { it.ErrorMsg, it.Method, it.Title, it.OperTime })
@@ -248,11 +248,11 @@ namespace ZR.ServiceCore.Services
         /// 构建区间内操作日志查询。每次调用返回全新 queryable，
         /// 避免 SqlSugar 同一实例在 Count()/ToList() 之间复用时共享查询状态产生串扰。
         /// </summary>
-        private ISugarQueryable<SysOperLog> BuildRangeQuery(DateTime begin, DateTime end, string operName)
+        private ISugarQueryable<SysOperLog> BuildRangeQuery(DateTime begin, DateTime end, long? userId)
         {
             return Queryable()
                 .Where(it => it.OperTime >= begin && it.OperTime <= end)
-                .WhereIF(!string.IsNullOrEmpty(operName), it => it.OperName == operName);
+                .WhereIF(userId.HasValue, it => it.UserId == userId);
         }
 
         /// <summary>
@@ -260,7 +260,7 @@ namespace ZR.ServiceCore.Services
         /// 模块/操作人基数可能很大，统一按 TopN 截断并把长尾合并为"其他"；
         /// 操作类型最多 11 种、风险等级固定 3 档，无需合并。
         /// </summary>
-        public List<OperDimensionStat> GetOperDimensionStats(LogAiAnalysisInput input, string dimension, string operName = null, int topN = 12)
+        public List<OperDimensionStat> GetOperDimensionStats(LogAiAnalysisInput input, string dimension, long? userId = null, int topN = 12)
         {
             input ??= new LogAiAnalysisInput();
             var (begin, end) = input.ResolveRange();
@@ -269,7 +269,7 @@ namespace ZR.ServiceCore.Services
             if (kind == OperDimensionKinds.Risk)
             {
                 // 风险等级由 BusinessType 推导，先按类型聚合再内存归并到三档
-                var byType = GroupByBusinessType(begin, end, operName);
+                var byType = GroupByBusinessType(begin, end, userId);
                 return byType
                     .GroupBy(x => DescribeRiskLevel(x.BusinessType))
                     .Select(g => new OperDimensionStat
@@ -285,7 +285,7 @@ namespace ZR.ServiceCore.Services
             List<OperDimensionStat> stats;
             if (kind == OperDimensionKinds.Type)
             {
-                stats = GroupByBusinessType(begin, end, operName)
+                stats = GroupByBusinessType(begin, end, userId)
                     .Select(x => new OperDimensionStat
                     {
                         Name = DescribeBusinessType(x.BusinessType),
@@ -299,7 +299,7 @@ namespace ZR.ServiceCore.Services
                 // 操作人/模块按各自字段分组（匿名 lambda 无法推断条件类型，拆成两次 GroupBy）
                 if (kind == OperDimensionKinds.User)
                 {
-                    stats = BuildRangeQuery(begin, end, operName)
+                    stats = BuildRangeQuery(begin, end, userId)
                         .GroupBy(it => it.OperName)
                         .Select(it => new
                         {
@@ -318,7 +318,7 @@ namespace ZR.ServiceCore.Services
                 }
                 else
                 {
-                    stats = BuildRangeQuery(begin, end, operName)
+                    stats = BuildRangeQuery(begin, end, userId)
                         .GroupBy(it => it.Title)
                         .Select(it => new
                         {
@@ -357,9 +357,9 @@ namespace ZR.ServiceCore.Services
         }
 
         private List<(int BusinessType, int Total, int Errors)> GroupByBusinessType(
-            DateTime begin, DateTime end, string operName)
+            DateTime begin, DateTime end, long? userId)
         {
-            return BuildRangeQuery(begin, end, operName)
+            return BuildRangeQuery(begin, end, userId)
                 .GroupBy(it => it.BusinessType)
                 .Select(it => new
                 {

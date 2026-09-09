@@ -24,16 +24,18 @@ namespace ZR.ServiceCore.AI.Charts
         private static readonly Logger _logger = LogManager.GetCurrentClassLogger();
 
         private readonly ISysOperLogService _operLogService;
-        private readonly ISysUserService _userService;
         private readonly ISysPermissionService _permissionService;
 
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="operLogService"></param>
+        /// <param name="permissionService"></param>
         public OperLogChartDatasetProvider(
             ISysOperLogService operLogService,
-            ISysUserService userService,
             ISysPermissionService permissionService)
         {
             _operLogService = operLogService;
-            _userService = userService;
             _permissionService = permissionService;
         }
 
@@ -81,11 +83,11 @@ namespace ZR.ServiceCore.AI.Charts
 
             var kind = OperDimensionKinds.Normalize(dimension);
             var dim = Dimensions.FirstOrDefault(x => x.Key == kind) ?? Dimensions[0];
-            var scope = ResolveScope(userId, out var operName);
-            var title = $"操作日志·按{dim.Label}{scope}";
+            var scopeUserId = ResolveScope(userId);
+            var title = $"操作日志·按{dim.Label}{(scopeUserId == null ? "" : "（仅本人）")}";
 
             // 非管理员但无法识别当前用户（异常兜底）：不返回任何行，避免退化成全量统计
-            if (scope != null && string.IsNullOrWhiteSpace(operName))
+            if (scopeUserId != null && scopeUserId <= 0)
             {
                 return Task.FromResult(new AiChartQueryResult
                 {
@@ -100,7 +102,7 @@ namespace ZR.ServiceCore.AI.Charts
                 });
             }
 
-            var stats = _operLogService.GetOperDimensionStats(input, kind, operName, TopN) ?? [];
+            var stats = _operLogService.GetOperDimensionStats(input, kind, scopeUserId, TopN) ?? [];
             return Task.FromResult(new AiChartQueryResult
             {
                 DatasetId = DatasetId,
@@ -131,17 +133,16 @@ namespace ZR.ServiceCore.AI.Charts
         }
 
         /// <summary>
-        /// 管理员（*:*:*）统计全量返回 scope=null；非管理员限定本人（operName=当前登录用户名）。
-        /// 计算权限失败时按非管理员处理（安全优先），此时若再取不到用户名即返回空结果。
+        /// 识别统计范围：管理员（*:*:*）返回 null 统计全量；非管理员返回本人 userId 仅统计本人。
+        /// 计算权限失败时按非管理员处理（安全优先）。
         /// </summary>
-        private string ResolveScope(long userId, out string operName)
+        private long? ResolveScope(long userId)
         {
             try
             {
                 var perms = _permissionService.GetMenuPermission(new SysUserDto { UserId = userId });
                 if (perms != null && perms.Contains(GlobalConstant.AdminPerm))
                 {
-                    operName = null;
                     return null;
                 }
             }
@@ -149,17 +150,7 @@ namespace ZR.ServiceCore.AI.Charts
             {
                 _logger.Warn(ex, "OperLogChartDatasetProvider 计算用户权限失败，按非管理员处理 userId={UserId}", userId);
             }
-
-            try
-            {
-                operName = _userService.SelectUserById(userId)?.UserName;
-            }
-            catch (Exception ex)
-            {
-                _logger.Warn(ex, "OperLogChartDatasetProvider 解析当前用户名失败 userId={UserId}", userId);
-                operName = null;
-            }
-            return "（仅本人）";
+            return userId;
         }
     }
 }

@@ -87,7 +87,7 @@ namespace ZR.Admin.WebApi.Controllers.monitor
 
         /// <summary>
         /// AI 操作日志健康分析：慢操作/错误聚类等指标交由大模型解读，返回 Markdown 报告（不落库）。
-        /// 非管理员强制只分析本人日志，与列表页口径一致。
+        /// 非管理员强制只分析本人日志（按 UserId 过滤），与列表页口径一致。
         /// </summary>
         [HttpPost("aiHealth")]
         [ActionPermissionFilter(Permission = "monitor:operlog:ai")]
@@ -96,8 +96,8 @@ namespace ZR.Admin.WebApi.Controllers.monitor
         {
             try
             {
-                var operName = !HttpContextExtension.IsAdmin(HttpContext) ? HttpContextExtension.GetName(HttpContext) : null;
-                var metrics = sysOperLogService.GetOperHealthMetrics(input, operName);
+                long? scopeUserId = HttpContextExtension.IsAdmin(HttpContext) ? null : HttpContextExtension.GetUId(HttpContext);
+                var metrics = sysOperLogService.GetOperHealthMetrics(input, scopeUserId);
                 return SUCCESS(await sysAiService.AnalyzeOperHealthAsync(metrics));
             }
             catch (Exception ex)

@@ -122,7 +122,7 @@ namespace ZR.ServiceCore.AI
 
         /// <summary>
         /// 操作日志健康指标：权限与页面 aiHealth 一致（monitor:operlog:ai）。
-        /// 管理员全量，非管理员仅统计本人（operName = 当前登录用户名），与页面同口径。
+        /// 管理员全量，非管理员仅统计本人（按 UserId 过滤，不再依赖用户名），与页面同口径。
         /// </summary>
         private Task<AiToolExecResult> AnalyzeOperHealthAsync(string argsJson, long userId)
         {
@@ -134,19 +134,16 @@ namespace ZR.ServiceCore.AI
 
             var isAdmin = perms.Contains(GlobalConstant.AdminPerm);
             var input = ParseInput(argsJson);
-            string operName = null;
+            long? scopeUserId = null;
             var owner = "全部用户";
             if (!isAdmin)
             {
-                operName = _userService.SelectUserById(userId)?.UserName;
-                owner = $"用户 {operName}";
-                if (string.IsNullOrWhiteSpace(operName))
-                {
-                    return Task.FromResult(AiToolExecResult.Error("无法识别当前登录用户，已中止操作日志分析。"));
-                }
+                scopeUserId = userId;
+                var operName = _userService.SelectUserById(userId)?.UserName;
+                owner = string.IsNullOrWhiteSpace(operName) ? "当前用户" : $"用户 {operName}";
             }
 
-            var metrics = _operLogService.GetOperHealthMetrics(input, operName);
+            var metrics = _operLogService.GetOperHealthMetrics(input, scopeUserId);
             if (metrics == null || metrics.TotalCount <= 0)
             {
                 var (b, e) = input.ResolveRange();

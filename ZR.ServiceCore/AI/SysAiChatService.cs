@@ -38,6 +38,8 @@ namespace ZR.ServiceCore.AI
         private const int MaxHistoryMessages = 20;
         /// <summary>单条工具结果回灌给模型的最大长度</summary>
         private const int ToolResultMaxLen = 8000;
+        /// <summary>单条用户消息最大长度（与请求 DTO 校验一致，服务端兜底防超长文本烧 token）</summary>
+        private const int MaxUserMessageLength = 2000;
 
         /// <param name="sysAi">系统 AI 服务（日程解析/周报）</param>
         /// <param name="scheduleService">日程服务（日程查询工具）</param>
@@ -611,8 +613,14 @@ namespace ZR.ServiceCore.AI
             {
                 throw new Exception("消息内容不能为空");
             }
+            if (message.Length > MaxUserMessageLength)
+            {
+                throw new Exception($"消息内容过长，最多 {MaxUserMessageLength} 字");
+            }
 
             var options = AiHelper.EnsureAiEnabled();
+            // 用户级限流：每分钟条数 + 当月累计 token 额度（防脚本/盗号高频刷 LLM 造成费用与资源浪费）
+            await EnsureChatQuotaAsync(options, userId);
             var resolved = _llm.ResolveProvider(options);
             var model = string.IsNullOrWhiteSpace(resolved.Model) ? options.Model : resolved.Model;
 
@@ -631,6 +639,53 @@ namespace ZR.ServiceCore.AI
                 Tools = BuildToolObjects(),
                 HistoryCount = historyCount
             };
+        }
+
+        /// <summary>
+        /// 用户级限流守卫：每分钟对话条数上限 + 当月累计 token 额度上限。
+        /// 防脚本/被盗账号高频刷 LLM 造成费用与资源浪费（按用户计费，非 IP）。
+        /// 阈值均取自 AiOptions 配置；0 表示对应维度不限制。
+        /// 触发任一上限时抛出友好异常，由上层转为提示，不发起任何模型调用。
+        /// </summary>
+        /// <param name="options">AI 配置（含限流阈值）</param>
+        /// <param name="userId">当前登录用户ID（0 表示无登录上下文，不限额）</param>
+        /// <exception cref="Exception">超过限流阈值时抛出</exception>
+        private async Task EnsureChatQuotaAsync(AiOptions options, long userId)
+        {
+            if (userId <= 0)
+            {
+                return;// 无登录上下文（理论不会走到，聊天接口均有鉴权），不做限制
+            }
+
+            var now = DateTime.Now;
+
+            // 1) 每分钟条数上限：按 ai_call_log 实际模型调用计数（与记账同一数据源，多实例/多进程一致）
+            if (options.ChatRateLimitPerMinute > 0)
+            {
+                var minuteStart = now.AddMinutes(-1);
+                var recentCalls = await Context.Queryable<AiCallLog>()
+                    .Where(m => m.Scene == "ai_chat" && m.UserId == userId && m.CreateTime >= minuteStart)
+                    .CountAsync();
+                if (recentCalls >= options.ChatRateLimitPerMinute)
+                {
+                    _logger.Warn($"AI 聊天频率超限被拦截 userId={userId} recent={recentCalls} limit={options.ChatRateLimitPerMinute}");
+                    throw new Exception($"发送过于频繁，请稍后再试（每分钟最多 {options.ChatRateLimitPerMinute} 条）");
+                }
+            }
+
+            // 2) 当月累计 token 额度上限（自然月，每月 1 日重置）
+            if (options.DefaultUserTotalTokens > 0)
+            {
+                var monthStart = new DateTime(now.Year, now.Month, 1);
+                var usedTokens = await Context.Queryable<AiCallLog>()
+                    .Where(m => m.Scene == "ai_chat" && m.UserId == userId && m.CreateTime >= monthStart)
+                    .SumAsync(m => m.TotalTokens);
+                if (usedTokens >= options.DefaultUserTotalTokens)
+                {
+                    _logger.Warn($"AI 聊天月度额度已耗尽被拦截 userId={userId} used={usedTokens} limit={options.DefaultUserTotalTokens}");
+                    throw new Exception("本月 AI 用量已达上限，次月重置后再试");
+                }
+            }
         }
 
         /// <summary>
