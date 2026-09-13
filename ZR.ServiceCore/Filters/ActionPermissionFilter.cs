@@ -23,13 +23,11 @@ namespace ZR.ServiceCore.Middleware
         /// 角色字符串，例如 common,admin
         /// </summary>
         public string RolePermi { get; set; } = string.Empty;
-        private bool HasPermi { get; set; }
 
         public ActionPermissionFilter() { }
         public ActionPermissionFilter(string permission)
         {
             Permission = permission;
-            HasPermi = !string.IsNullOrEmpty(Permission);
         }
 
         /// <summary>
@@ -40,6 +38,7 @@ namespace ZR.ServiceCore.Middleware
         /// <returns></returns>
         public override Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
         {
+            var hasPermi = false;
             // 优先从 Items 读取，避免重复解析 JWT（JwtAuthMiddleware 已解析并存入）
             LoginUser info = context.HttpContext.Items.TryGetValue(HttpContextExtension.CurrentUserCacheKey, out var cached) && cached is LoginUser user
                 ? user
@@ -77,22 +76,22 @@ namespace ZR.ServiceCore.Middleware
                 info.Permissions = perms;
                 if (perms.Exists(f => f.Equals(GlobalConstant.AdminPerm)))
                 {
-                    HasPermi = true;
+                    hasPermi = true;
                 }
                 else if (rolePerms.Exists(f => f.Equals(GlobalConstant.AdminRole)))
                 {
-                    HasPermi = true;
+                    hasPermi = true;
                 }
                 else if (!string.IsNullOrEmpty(Permission))
                 {
                     //HasPermi = perms.Exists(f => f.ToLower() == Permission.ToLower());
                     var requiredPerms = Permission.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                                   .Select(p => p.ToLower()).ToList();
-                    HasPermi = perms.Select(p => p.ToLower()).Intersect(requiredPerms).Any();
+                    hasPermi = perms.Select(p => p.ToLower()).Intersect(requiredPerms).Any();
                 }
-                if (!HasPermi && !string.IsNullOrEmpty(RolePermi))
+                if (!hasPermi && !string.IsNullOrEmpty(RolePermi))
                 {
-                    HasPermi = info.RoleKeys.Contains(RolePermi);
+                    hasPermi = info.RoleKeys.Contains(RolePermi);
                 }
                 bool isDemoMode = AppSettings.GetAppConfig("DemoMode", false);
                 bool isGet = HttpMethods.IsGet(context.HttpContext.Request.Method);
@@ -112,7 +111,7 @@ namespace ZR.ServiceCore.Middleware
                         context.Result = new JsonResult(new { code = (int)ResultCode.FORBIDDEN, msg = "演示模式 , 不允许操作", jumpStatus = !isGet });
                     }
                 }
-                if (!HasPermi && !Permission.Equals("common"))
+                if (!hasPermi && !Permission.Equals("common"))
                 {
                     logger.Info($"用户{info.UserName}没有权限访问{url}，当前权限[{Permission}]");
                     var apiResult = new ApiResult((int)ResultCode.FORBIDDEN, $"你当前没有权限访问,请联系管理员", url);

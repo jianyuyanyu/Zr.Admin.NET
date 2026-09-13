@@ -61,6 +61,16 @@ builder.Services.AddDataProtection()
 builder.Services.AddCaptchaProvider();
 // 读取额外配置文件（iprate.json 要在注册限流服务之前加载）
 builder.Configuration.AddJsonFile("iprate.json");
+// AI 独立配置：ai.json < ai.{Environment}.json < UserSecrets < 环境变量 < 命令行
+// CreateBuilder 之后再 AddJsonFile 会盖掉已加载的 UserSecrets/环境变量，因此这里补挂回去。
+builder.Configuration.AddJsonFile("ai.json", optional: false, reloadOnChange: true);
+builder.Configuration.AddJsonFile($"ai.{builder.Environment.EnvironmentName}.json", optional: true, reloadOnChange: true);
+if (builder.Environment.IsDevelopment())
+{
+    builder.Configuration.AddUserSecrets(typeof(Program).Assembly, optional: true);
+}
+builder.Configuration.AddEnvironmentVariables();
+builder.Configuration.AddCommandLine(args);
 //接口限流（客户端模式：登录用户优先，匿名回退按 IP，规则见 iprate.json）
 builder.Services.AddUserRateLimiting(builder.Configuration);
 //builder.Services.AddSession();

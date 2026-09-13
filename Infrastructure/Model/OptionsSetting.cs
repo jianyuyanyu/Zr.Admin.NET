@@ -285,7 +285,7 @@ namespace Infrastructure.Model
         public string Model { get; set; }
 
         /// <summary>
-        /// API Key
+        /// API Key。优先用 Providers 分项里的 ApiKey，这里是未匹配到分项时的兜底。
         /// </summary>
         public string ApiKey { get; set; }
 
@@ -361,6 +361,19 @@ namespace Infrastructure.Model
         /// 下载附件文本或把图片 URL 发给视觉模型，如 ["upload.example.com"]。
         /// </summary>
         public List<string> AttachmentDownloadAllowedHosts { get; set; }
+
+        /// <summary>
+        /// 单用户每分钟 AI 助手（aichat）最多发起的对话消息数；0=不限制。
+        /// 防止脚本/被盗账号高频刷 LLM 造成费用与资源浪费（按用户计，非 IP）。
+        /// </summary>
+        public int ChatRateLimitPerMinute { get; set; } = 20;
+
+        /// <summary>
+        /// 单用户当月累计消耗 token 上限（自然月，每月 1 日重置）；0=不限制。
+        /// 兑现配置注释原意：达阈值后拒绝该用户继续发起 AI 对话，直到次月重置。
+        /// 按 ai_call_log(Scene='ai_chat') 记账累计。
+        /// </summary>
+        public long DefaultUserTotalTokens { get; set; } = 2000000;
     }
 
     public class AiProviderOptions
@@ -370,11 +383,17 @@ namespace Infrastructure.Model
         /// </summary>
         public string Provider { get; set; }
 
+        /// <summary>下拉展示名，如 通义千问。留空则显示 Provider 标识。</summary>
+        public string Label { get; set; }
+
         public string BaseUrl { get; set; }
 
         public string ChatEndpoint { get; set; }
 
         public string Model { get; set; }
+
+        /// <summary>该 Provider 可出现在下拉中的模型建议；真正发请求仍用 Model。</summary>
+        public List<string> Models { get; set; }
 
         public string ApiKey { get; set; }
 

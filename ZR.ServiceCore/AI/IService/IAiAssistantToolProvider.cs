@@ -1,5 +1,3 @@
-using System.Collections.Generic;
-using System.Threading.Tasks;
 using ZR.Model.AI.Dto;
 
 namespace ZR.ServiceCore.AI.IService

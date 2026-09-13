@@ -29,11 +29,6 @@ namespace ZR.Admin.WebApi.Controllers.AI
         [ActionPermissionFilter(Permission = "ai:usage:list")]
         public IActionResult Summary([FromQuery] AiUsageQueryDto parm)
         {
-            var denied = RequireAdmin("仅管理员可查看全站用量");
-            if (denied != null)
-            {
-                return denied;
-            }
             return SUCCESS(_aiUsageService.GetSummary(parm, isAdmin: true));
         }
 
@@ -44,11 +39,6 @@ namespace ZR.Admin.WebApi.Controllers.AI
         [ActionPermissionFilter(Permission = "ai:usage:list")]
         public IActionResult Users([FromQuery] AiUsageQueryDto parm)
         {
-            var denied = RequireAdmin("仅管理员可查看全站用户用量");
-            if (denied != null)
-            {
-                return denied;
-            }
             return SUCCESS(_aiUsageService.GetUserAggregate(parm, isAdmin: true));
         }
 
@@ -59,11 +49,6 @@ namespace ZR.Admin.WebApi.Controllers.AI
         [ActionPermissionFilter(Permission = "ai:usage:list")]
         public IActionResult List([FromQuery] AiUsageQueryDto parm)
         {
-            var denied = RequireAdmin("仅管理员可查看全站调用明细");
-            if (denied != null)
-            {
-                return denied;
-            }
             return SUCCESS(_aiUsageService.GetList(parm, isAdmin: true));
         }
 
@@ -94,13 +79,5 @@ namespace ZR.Admin.WebApi.Controllers.AI
 
         #endregion
 
-        /// <summary>
-        /// 管理端闸门：仅超管账号（userName == admin）放行，与 ai:usage:list 权限构成双闸
-        /// （普通角色即使配了权限也进不来，属有意为之）。放行返回 null，否则返回拒绝响应。
-        /// </summary>
-        private IActionResult RequireAdmin(string message)
-        {
-            return HttpContext.IsAdmin() ? null : ToResponse(ResultCode.FORBIDDEN, message);
-        }
     }
 }

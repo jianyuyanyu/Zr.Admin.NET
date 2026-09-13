@@ -14,6 +14,12 @@ namespace ZR.Model.AI.Dto
         /// <summary>能力场景过滤（ai_chat / wf_generate / lang_translate 等），空为全部</summary>
         public string Scene { get; set; }
 
+        public string TenantId { get; set; }
+        public string Provider { get; set; }
+        public string Model { get; set; }
+        public string Status { get; set; }
+        public string ErrorType { get; set; }
+
         /// <summary>统计开始时间（默认最近 30 天）</summary>
         public DateTime? BeginTime { get; set; }
 
@@ -38,11 +44,23 @@ namespace ZR.Model.AI.Dto
         /// <summary>总 token 合计</summary>
         public long TotalTokens { get; set; }
 
+        public int SuccessCalls { get; set; }
+        public int FailedCalls { get; set; }
+        public int TimeoutCalls { get; set; }
+        public int RejectedCalls { get; set; }
+        public decimal SuccessRate { get; set; }
+        public long AverageDurationMs { get; set; }
+        public long P95DurationMs { get; set; }
+        public decimal EstimatedAmount { get; set; }
+        public string Currency { get; set; } = "CNY";
+
         /// <summary>按天分布（升序）</summary>
         public List<AiUsageDailyDto> Daily { get; set; } = new();
 
         /// <summary>按能力场景分布（token 倒序）</summary>
         public List<AiUsageSceneDto> Scenes { get; set; } = new();
+
+        public List<AiUsageErrorDto> Errors { get; set; } = new();
     }
 
     /// <summary>
@@ -50,6 +68,7 @@ namespace ZR.Model.AI.Dto
     /// </summary>
     public class AiUsageUserDto
     {
+        public string TenantId { get; set; }
         public long UserId { get; set; }
 
         /// <summary>用户名；后台任务（UserId=0）显示为系统任务</summary>
@@ -66,6 +85,7 @@ namespace ZR.Model.AI.Dto
 
         /// <summary>token 合计</summary>
         public long TotalTokens { get; set; }
+        public decimal EstimatedAmount { get; set; }
     }
 
     /// <summary>
@@ -81,6 +101,10 @@ namespace ZR.Model.AI.Dto
 
         /// <summary>token 合计</summary>
         public long TotalTokens { get; set; }
+        public int SuccessCalls { get; set; }
+        public int FailedCalls { get; set; }
+        public long AverageDurationMs { get; set; }
+        public decimal EstimatedAmount { get; set; }
     }
 
     /// <summary>
@@ -95,6 +119,15 @@ namespace ZR.Model.AI.Dto
 
         /// <summary>token 合计</summary>
         public long TotalTokens { get; set; }
+        public int SuccessCalls { get; set; }
+        public int FailedCalls { get; set; }
+        public decimal EstimatedAmount { get; set; }
+    }
+
+    public class AiUsageErrorDto
+    {
+        public string ErrorType { get; set; }
+        public int Calls { get; set; }
     }
 
     /// <summary>
@@ -107,12 +140,24 @@ namespace ZR.Model.AI.Dto
         public string Provider { get; set; }
 
         public string Model { get; set; }
+        public string TenantId { get; set; }
+        public string RequestId { get; set; }
+        public string TraceId { get; set; }
+        public int? Success { get; set; }
+        public string Status { get; set; }
+        public string ErrorType { get; set; }
+        public int? HttpStatusCode { get; set; }
+        public long DurationMs { get; set; }
+        public string ProviderRequestId { get; set; }
+        public bool IsStream { get; set; }
 
         public int PromptTokens { get; set; }
 
         public int CompletionTokens { get; set; }
 
         public int TotalTokens { get; set; }
+        public decimal EstimatedAmount { get; set; }
+        public string Currency { get; set; }
 
         /// <summary>触发用户（后台任务无登录上下文时为空）</summary>
         public string UserName { get; set; }

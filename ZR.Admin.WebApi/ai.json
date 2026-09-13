@@ -1,0 +1,50 @@
+{
+  // AI 公共默认。密钥写在各 Provider 的 ApiKey；本地用同结构的 ai.Development.json 覆盖。
+  "AiOptions": {
+    "Enable": true,
+    "Provider": "qwen",
+    "SystemPrompt": "你是系统内置 AI 助手，请用简洁中文回答。",
+    "Temperature": 0.7,
+    "MaxTokens": 4096,
+    "TimeoutSeconds": 60,
+    "EnableThinking": false,
+    "DefaultUserTotalTokens": 2000000,
+    "ChatRateLimitPerMinute": 20,
+    "PromptDir": "",
+    "Providers": [
+      {
+        "Provider": "openai",
+        "Label": "OpenAI",
+        "BaseUrl": "https://api.openai.com",
+        "ChatEndpoint": "/v1/chat/completions",
+        "ApiKey": "",
+        "Model": "gpt-4o-mini",
+        "Models": [ "gpt-4o-mini", "gpt-4o" ]
+      },
+      {
+        "Provider": "deepseek",
+        "Label": "DeepSeek",
+        "BaseUrl": "https://api.deepseek.com",
+        "ChatEndpoint": "/chat/completions",
+        "ApiKey": "",
+        "Model": "deepseek-chat",
+        "Models": [ "deepseek-chat", "deepseek-reasoner" ]
+      },
+      {
+        "Provider": "qwen",
+        "Label": "通义千问",
+        "BaseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "ChatEndpoint": "/chat/completions",
+        "ApiKey": "",
+        "Model": "qwen3.7-plus",
+        "Models": [ "qwen-turbo", "qwen-plus", "qwen-max", "qwen3.7-plus" ]
+      }
+    ],
+    "VisionProvider": "",
+    "VisionBaseUrl": "",
+    "VisionChatEndpoint": "",
+    "VisionModel": "",
+    "VisionApiKey": "",
+    "AttachmentDownloadAllowedHosts": []
+  }
+}

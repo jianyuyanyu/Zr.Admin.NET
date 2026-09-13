@@ -54,6 +54,7 @@ namespace ZR.Mall.Service
 			typeof(Brand),
 			typeof(OMSOrder),
 			typeof(OMSOrderItem),
+			typeof(OMSOrderLog),
 			typeof(OMSPayment),
 			typeof(MMSUserAddress),
 			typeof(SpecTemplate),

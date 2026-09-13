@@ -210,17 +210,16 @@ namespace ZR.ServiceCore.AI
                 $"登录安全分析（{m.TimeRange}）",
                 $"登录总数 {m.TotalCount}：成功 {m.SuccessCount}，失败 {m.FailCount}（失败率 {failRate:0.0}%）",
                 $"凌晨0-6点登录 {m.NightCount} 次，其中失败 {m.NightFailCount} 次",
-                $"区间内去重 IP {m.DistinctIpCount} 个，其中近30天未出现的新 IP {m.NewIpCount} 个{(m.IpMasked ? "（当前无查看真实IP权限，IP已脱敏）" : "")}"
+                $"区间内去重 IP {m.DistinctIpCount} 个，其中近30天未出现的新 IP {m.NewIpCount} 个{(m.IpMasked ? "（当前无查看真实IP权限，IP已脱敏）" : "")}",
+                "异地/新地点成功登录：" + FormatRemote(m),
+                "每日趋势：" + FormatDaily(m.Daily, d => $"{d.Date} 成{d.Success}/败{d.Fail}"),
+                "登录失败账号 Top：" + FormatTop(m.FailedAccounts, a =>
+                    $"{a.UserName} {a.FailCount}次/来自{a.LocationCount}地{(string.IsNullOrEmpty(a.Locations) ? "" : $"({a.Locations})")}"),
+                "登录失败来源 IP Top：" + FormatTop(m.FailedIps, a =>
+                    $"{a.Ipaddr} {a.FailCount}次{(string.IsNullOrEmpty(a.Location) ? "" : $"/{a.Location}")}"),
+                "浏览器分布：" + FormatTop(m.Browsers, a => $"{a.Name} {a.Count}"),
+                "操作系统分布：" + FormatTop(m.Oses, a => $"{a.Name} {a.Count}")
             };
-
-            lines.Add("异地/新地点成功登录：" + FormatRemote(m));
-            lines.Add("每日趋势：" + FormatDaily(m.Daily, d => $"{d.Date} 成{d.Success}/败{d.Fail}"));
-            lines.Add("登录失败账号 Top：" + FormatTop(m.FailedAccounts, a =>
-                $"{a.UserName} {a.FailCount}次/来自{a.LocationCount}地{(string.IsNullOrEmpty(a.Locations) ? "" : $"({a.Locations})")}"));
-            lines.Add("登录失败来源 IP Top：" + FormatTop(m.FailedIps, a =>
-                $"{a.Ipaddr} {a.FailCount}次{(string.IsNullOrEmpty(a.Location) ? "" : $"/{a.Location}")}"));
-            lines.Add("浏览器分布：" + FormatTop(m.Browsers, a => $"{a.Name} {a.Count}"));
-            lines.Add("操作系统分布：" + FormatTop(m.Oses, a => $"{a.Name} {a.Count}"));
 
             return string.Join("\n", lines);
         }
@@ -233,17 +232,16 @@ namespace ZR.ServiceCore.AI
             {
                 $"操作日志健康分析（{m.TimeRange}，范围：{owner}）",
                 $"操作总数 {m.TotalCount}：错误 {m.ErrorCount}（错误率 {errRate:0.00}%）",
-                $"耗时 P95：{p95}；凌晨0-6点操作 {m.NightCount} 次"
+                $"耗时 P95：{p95}；凌晨0-6点操作 {m.NightCount} 次",
+                "每日趋势：" + FormatDaily(m.Daily, d => $"{d.Date} 共{d.Total}/错{d.Errors}"),
+                "业务类型分布：" + FormatTop(m.BusinessTypes, t =>
+                    $"{t.TypeName} {t.Total}次/错{t.Errors}"),
+                "慢操作 Top：" + FormatTop(m.SlowOps, s =>
+                    $"{s.Title}({s.Method}) 均{s.AvgElapsed:0}ms/最大{s.MaxElapsed}ms ×{s.Count}次"),
+                "敏感操作(删除/导出/强退/清空)Top 账号：" + FormatTop(m.RiskAccounts, a => $"{a.Name} {a.Count}次"),
+                "错误聚类 Top：" + FormatTop(m.ErrorClusters, c =>
+                    $"[{c.Count}次] {Clip(c.Pattern, 80)}（示例：{Clip(c.SampleErrorMsg ?? "", 80)} / {c.SampleTitle}）")
             };
-
-            lines.Add("每日趋势：" + FormatDaily(m.Daily, d => $"{d.Date} 共{d.Total}/错{d.Errors}"));
-            lines.Add("业务类型分布：" + FormatTop(m.BusinessTypes, t =>
-                $"{t.TypeName} {t.Total}次/错{t.Errors}"));
-            lines.Add("慢操作 Top：" + FormatTop(m.SlowOps, s =>
-                $"{s.Title}({s.Method}) 均{s.AvgElapsed:0}ms/最大{s.MaxElapsed}ms ×{s.Count}次"));
-            lines.Add("敏感操作(删除/导出/强退/清空)Top 账号：" + FormatTop(m.RiskAccounts, a => $"{a.Name} {a.Count}次"));
-            lines.Add("错误聚类 Top：" + FormatTop(m.ErrorClusters, c =>
-                $"[{c.Count}次] {Clip(c.Pattern, 80)}（示例：{Clip(c.SampleErrorMsg ?? "", 80)} / {c.SampleTitle}）"));
             if (!string.IsNullOrWhiteSpace(m.SampleNote))
             {
                 lines.Add($"说明：{m.SampleNote}");

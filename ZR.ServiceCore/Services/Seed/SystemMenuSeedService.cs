@@ -35,12 +35,34 @@ namespace ZR.ServiceCore.Services
             Buttons: [],
             Icon: "chart");
 
+        private static readonly SeedPage AiGovernancePage = new(
+            Name: "AI治理",
+            Path: "aiGovernance",
+            Component: "Ai/AiGovernance",
+            Perms: "ai:governance:list",
+            OrderNum: 2,
+            Buttons:
+            [
+                new SeedButton("治理策略查询", "ai:governance:list", OrderNum: 10),
+                new SeedButton("治理策略详情", "ai:governance:query", OrderNum: 11),
+                new SeedButton("治理策略新增", "ai:governance:add", OrderNum: 12),
+                new SeedButton("治理策略修改", "ai:governance:edit", OrderNum: 13),
+                new SeedButton("治理策略删除", "ai:governance:remove", OrderNum: 14),
+                new SeedButton("Provider 检测", "ai:governance:health", OrderNum: 15),
+                new SeedButton("模型价格查询", "ai:price:list", OrderNum: 20),
+                new SeedButton("模型价格详情", "ai:price:query", OrderNum: 21),
+                new SeedButton("模型价格新增", "ai:price:add", OrderNum: 22),
+                new SeedButton("模型价格修改", "ai:price:edit", OrderNum: 23),
+                new SeedButton("模型价格删除", "ai:price:remove", OrderNum: 24),
+            ],
+            Icon: "system");
+
         private static readonly SeedPage AiUsageMinePage = new(
             Name: "我的用量",
             Path: "myUsage",
             Component: "Ai/AiUsageMine",
             Perms: "ai:usage:mine",
-            OrderNum: 2,
+            OrderNum: 3,
             Buttons:
             [
                 new SeedButton("AI 办公助手", "ai:chat", OrderNum: 99),
@@ -111,6 +133,7 @@ namespace ZR.ServiceCore.Services
             var pages = new List<SeedPage>
             {
                 AiUsageAdminPage,
+                AiGovernancePage,
                 AiUsageMinePage,
             };
 

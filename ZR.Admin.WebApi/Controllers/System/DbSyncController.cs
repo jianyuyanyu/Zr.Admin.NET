@@ -48,12 +48,14 @@ namespace ZR.Admin.WebApi.Controllers.System
         public IActionResult Sync()
         {
             var logs = new List<string>();
+            var success = true;
 
             // 主库结构同步（建表 + 补列）
             try
             {
                 var mainDb = DbScoped.SugarScope;
                 var mainReport = DbMigrationService.Migrate(mainDb);
+                success = mainReport.Success;
                 logs.Add($"主库：新增表 {mainReport.NewTables.Count} 张，新增列 {mainReport.NewColumns.Sum(c => c.Columns.Count)} 个" +
                          (mainReport.HasFailures ? $"，失败 {mainReport.FailedEntities.Count} 个实体" : ""));
                 foreach (var t in mainReport.NewTables) logs.Add($"  + 表 {t}");
@@ -64,10 +66,14 @@ namespace ZR.Admin.WebApi.Controllers.System
             }
             catch (Exception ex)
             {
+                success = false;
                 logs.Add($"主库同步异常: {ex.Message}");
             }
 
-            return SUCCESS(new { Logs = logs, Success = true });
+            var data = new { Logs = logs, Success = success };
+            return success
+                ? SUCCESS(data)
+                : ToResponse(new ApiResult((int)ResultCode.FAIL, "主库结构同步失败", data));
         }
     }
 }

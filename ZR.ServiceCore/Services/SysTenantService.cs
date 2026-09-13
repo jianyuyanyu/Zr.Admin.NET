@@ -14,6 +14,7 @@ using ZR.Model.System.Dto;
 using ZR.Model.System.Tenant;
 using ZR.ServiceCore.Sms;
 using ZR.ServiceCore.Signalr;
+using ZR.ServiceCore.SqlSugar;
 
 namespace ZR.ServiceCore.Services
 {
@@ -362,6 +363,10 @@ namespace ZR.ServiceCore.Services
             db.CodeFirst.InitTables(typeof(SocialFans));
             db.CodeFirst.InitTables(typeof(SocialFansInfo));
             db.CodeFirst.InitTables(typeof(DailySchedule));
+            foreach (var entityType in DbMigrationService.TenantBusinessEntityTypes)
+            {
+                DbMigrationService.EnsureEntitySchema(db, entityType);
+            }
 
             // 调用各业务模块的租户级表初始化器（如商城、内容等），由模块自己决定需要创建哪些表
             foreach (var initializer in _moduleInitializers)

@@ -102,31 +102,69 @@ namespace Infrastructure.AI
                 ["Authorization"] = "Bearer " + (resolved.ApiKey ?? string.Empty)
             };
 
-            var responseText = await HttpHelper.HttpPostAsync(
-                uri.ToString(),
-                json,
-                "application/json",
-                options.TimeoutSeconds,
-                headers).ConfigureAwait(false);
-
-            if (string.IsNullOrWhiteSpace(responseText))
-            {
-                return string.Empty;
-            }
-
+            var lease = await BeginGovernedCallAsync(scene, resolved.Provider, resolved.Model, json, options.MaxTokens, false);
+            AiCallOutcome outcome = null;
             try
             {
-                using var doc = JsonDocument.Parse(responseText);
-                EnsureNoProviderError(responseText, doc.RootElement);
-                var content = ReadContent(doc.RootElement);
-                await LogUsageAsync(doc.RootElement, resolved.Provider, resolved.Model, scene);
-                return content;
+                var response = await HttpHelper.HttpPostDetailedAsync(
+                    uri.ToString(), json, "application/json", options.TimeoutSeconds, headers).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    outcome = Failed("http", "http_error", BuildAiErrorMessage(response.StatusCode, response.Content),
+                        response.StatusCode, response.RequestId);
+                    throw new HttpRequestException("AI 服务调用失败，请稍后重试或检查 AI 配置");
+                }
+                if (string.IsNullOrWhiteSpace(response.Content))
+                {
+                    outcome = Failed("empty", "empty_response", "AI 服务返回空响应",
+                        response.StatusCode, response.RequestId);
+                    return string.Empty;
+                }
+
+                try
+                {
+                    using var doc = JsonDocument.Parse(response.Content);
+                    if (HasProviderError(doc.RootElement))
+                    {
+                        outcome = Failed("provider", "provider_error",
+                            TryReadProviderErrorMessage(response.Content), response.StatusCode, response.RequestId);
+                        EnsureNoProviderError(response.Content, doc.RootElement);
+                    }
+                    var content = ReadContent(doc.RootElement);
+                    var usage = ReadUsageTokens(doc.RootElement, resolved.Provider);
+                    if (string.IsNullOrWhiteSpace(content))
+                    {
+                        outcome = Failed("empty", "unusable_response", "AI 服务响应无可用内容",
+                            response.StatusCode, response.RequestId);
+                        outcome.PromptTokens = usage.Prompt;
+                        outcome.CompletionTokens = usage.Completion;
+                        outcome.TotalTokens = usage.Total > 0 ? usage.Total : usage.Prompt + usage.Completion;
+                        outcome.HasUsage = usage.Prompt > 0 || usage.Completion > 0 || usage.Total > 0;
+                        throw new HttpRequestException("AI 服务返回了无法解析的响应，请稍后重试或联系管理员");
+                    }
+                    outcome = Succeeded(usage, response.StatusCode, response.RequestId);
+                    return content;
+                }
+                catch (JsonException ex)
+                {
+                    Logger.LogError(ex, "解析 AI 响应失败，按纯文本处理");
+                    outcome = Succeeded((0, 0, 0), response.StatusCode, response.RequestId, hasUsage: false);
+                    return response.Content;
+                }
             }
-            catch (JsonException ex)
+            catch (OperationCanceledException ex)
             {
-                Logger.LogError(ex, "解析 AI 响应失败，按纯文本处理");
-                // 非标准 JSON（如直接返回纯文本）时原样返回，由上层剥离/解析
-                return responseText;
+                outcome ??= Failed("timeout", "timeout", ex.Message);
+                throw new HttpRequestException("AI 服务响应超时，请稍后重试", ex);
+            }
+            catch (Exception ex)
+            {
+                outcome ??= Failed("failed", ClassifyError(ex), ex.Message);
+                throw;
+            }
+            finally
+            {
+                await CompleteGovernedCallAsync(lease, outcome);
             }
         }
 
@@ -163,29 +201,6 @@ namespace Infrastructure.AI
         }
 
         /// <summary>
-        /// 从 OpenAI 兼容响应读取 usage 并日志打印 token 输入/输出/合计，同时上报宿主落库。
-        /// 返回读取到的 token 三元组，供调用方（如 tools 模式）将本轮用量随结果回传。
-        /// 部分 Provider 可能不返回 usage，缺字段时按 0 处理，不抛异常。
-        /// </summary>
-        private static async Task<(int Prompt, int Completion, int Total)> LogUsageAsync(JsonElement root, string provider, string model, string scene = null)
-        {
-            try
-            {
-                var (promptTokens, completionTokens, totalTokens) = ReadUsageTokens(root, provider);
-                Logger.LogInformation("AI token usage [provider={Provider}, model={Model}, scene={Scene}] 输入(prompt)={PromptTokens} 输出(completion)={CompletionTokens} 合计(total)={TotalTokens}",
-                    provider, model, scene, promptTokens, completionTokens, totalTokens);
-                await ReportUsageAsync(scene, provider, model, promptTokens, completionTokens, totalTokens);
-                return (promptTokens, completionTokens, totalTokens);
-            }
-            catch (Exception ex)
-            {
-                Logger.LogWarning(ex, "读取 AI token 用量失败");
-                return (0, 0, 0);
-            }
-        }
-
-        /// <summary>
-        /// 读取 usage 节点的 token 计数三元组。
         /// 千问(DashScope)兼容 OpenAI 协议时 usage 字段名为 input_tokens/output_tokens，
         /// 与 OpenAI 标准的 prompt_tokens/completion_tokens 不同；deepseek 等仍用标准字段。
         /// 目标字段缺失时回退读取另一套字段名；仍缺失按 0。
@@ -204,33 +219,6 @@ namespace Infrastructure.AI
 
             var totalTokens = ReadUsage(root, "total_tokens");
             return (promptTokens, completionTokens, totalTokens);
-        }
-
-        /// <summary>
-        /// token 用量上报：宿主注册 IAiUsageRecorder（写入 ai_call_log 审计流水）时执行；
-        /// 未注册或写库失败仅告警，不阻断对话主链路。
-        /// </summary>
-        private static async Task ReportUsageAsync(string scene, string provider, string model,
-            int promptTokens, int completionTokens, int totalTokens)
-        {
-            try
-            {
-                var recorder = App.GetService<IAiUsageRecorder>();
-                if (recorder == null) return;
-                await recorder.RecordAsync(new AiUsageInfo
-                {
-                    Scene = scene,
-                    Provider = provider,
-                    Model = model,
-                    PromptTokens = promptTokens,
-                    CompletionTokens = completionTokens,
-                    TotalTokens = totalTokens
-                });
-            }
-            catch (Exception ex)
-            {
-                Logger.LogWarning(ex, "AI token 用量入库上报失败");
-            }
         }
 
         /// <summary>
@@ -382,44 +370,71 @@ namespace Infrastructure.AI
                 ["Authorization"] = "Bearer " + (resolved.ApiKey ?? string.Empty)
             };
 
-            var responseText = await HttpHelper.HttpPostAsync(
-                uri.ToString(),
-                json,
-                "application/json",
-                options.TimeoutSeconds,
-                headers).ConfigureAwait(false);
-
-            if (string.IsNullOrWhiteSpace(responseText))
-            {
-                Logger.LogError("AI 服务返回空响应（HTTP 200 但无 body）。uri={Uri}, model={Model}", uri, resolved.Model);
-                throw new HttpRequestException("AI 服务返回空响应，请稍后重试或联系管理员");
-            }
-
+            var lease = await BeginGovernedCallAsync(scene, resolved.Provider, resolved.Model, json, options.MaxTokens, false);
+            AiCallOutcome outcome = null;
             try
             {
-                using var doc = JsonDocument.Parse(responseText);
-                EnsureNoProviderError(responseText, doc.RootElement);
-                var result = ReadToolResult(doc.RootElement);
-                var (prompt, completion, total) = await LogUsageAsync(doc.RootElement, resolved.Provider, resolved.Model, scene);
-                result.PromptTokens = prompt;
-                result.CompletionTokens = completion;
-                result.TotalTokens = total;
-
-                // 模型返回成功但无正文也无工具调用：通常是响应结构异常或网关拦截。
-                // 详情（含截断的原始响应）只写后端日志便于排查，不抛给上层——上层会把异常消息透传前端。
-                if (string.IsNullOrWhiteSpace(result.Content) && (result.ToolCalls == null || result.ToolCalls.Count == 0))
+                var response = await HttpHelper.HttpPostDetailedAsync(
+                    uri.ToString(), json, "application/json", options.TimeoutSeconds, headers).ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
                 {
-                    Logger.LogError("AI 服务响应无可用内容（无 content 且无 tool_calls）。原始响应={Response}, uri={Uri}, model={Model}",
-                        TruncateForLog(responseText, 600), uri, resolved.Model);
-                    throw new HttpRequestException("AI 服务返回了无法解析的响应，请稍后重试或联系管理员");
+                    outcome = Failed("http", "http_error", BuildAiErrorMessage(response.StatusCode, response.Content),
+                        response.StatusCode, response.RequestId);
+                    throw new HttpRequestException("AI 服务调用失败，请稍后重试或检查 AI 配置");
                 }
-                return result;
+                if (string.IsNullOrWhiteSpace(response.Content))
+                {
+                    outcome = Failed("empty", "empty_response", "AI 服务返回空响应",
+                        response.StatusCode, response.RequestId);
+                    throw new HttpRequestException("AI 服务返回空响应，请稍后重试或联系管理员");
+                }
+
+                try
+                {
+                    using var doc = JsonDocument.Parse(response.Content);
+                    if (HasProviderError(doc.RootElement))
+                    {
+                        outcome = Failed("provider", "provider_error",
+                            TryReadProviderErrorMessage(response.Content), response.StatusCode, response.RequestId);
+                        EnsureNoProviderError(response.Content, doc.RootElement);
+                    }
+                    var result = ReadToolResult(doc.RootElement);
+                    var usage = ReadUsageTokens(doc.RootElement, resolved.Provider);
+                    result.PromptTokens = usage.Prompt;
+                    result.CompletionTokens = usage.Completion;
+                    result.TotalTokens = usage.Total;
+
+                    if (string.IsNullOrWhiteSpace(result.Content) && (result.ToolCalls == null || result.ToolCalls.Count == 0))
+                    {
+                        outcome = Failed("parse", "unusable_response", "AI 服务响应无可用内容",
+                            response.StatusCode, response.RequestId);
+                        Logger.LogError("AI 服务响应无可用内容（无 content 且无 tool_calls）。原始响应={Response}, uri={Uri}, model={Model}",
+                            TruncateForLog(response.Content, 600), uri, resolved.Model);
+                        throw new HttpRequestException("AI 服务返回了无法解析的响应，请稍后重试或联系管理员");
+                    }
+                    outcome = Succeeded(usage, response.StatusCode, response.RequestId);
+                    return result;
+                }
+                catch (JsonException ex)
+                {
+                    Logger.LogWarning(ex, "解析 AI tool 响应失败，按纯文本处理");
+                    outcome = Succeeded((0, 0, 0), response.StatusCode, response.RequestId, hasUsage: false);
+                    return new ChatToolResult { Content = response.Content };
+                }
             }
-            catch (JsonException ex)
+            catch (OperationCanceledException ex)
             {
-                // 非标准响应：原样作为文本兜底
-                Logger.LogWarning(ex, "解析 AI tool 响应失败，按纯文本处理");
-                return new ChatToolResult { Content = responseText };
+                outcome ??= Failed("timeout", "timeout", ex.Message);
+                throw new HttpRequestException("AI 服务响应超时，请稍后重试", ex);
+            }
+            catch (Exception ex)
+            {
+                outcome ??= Failed("failed", ClassifyError(ex), ex.Message);
+                throw;
+            }
+            finally
+            {
+                await CompleteGovernedCallAsync(lease, outcome);
             }
         }
 
@@ -467,19 +482,25 @@ namespace Infrastructure.AI
                 ["Authorization"] = "Bearer " + (resolved.ApiKey ?? string.Empty)
             };
 
-            using var streamResp = await HttpHelper.HttpPostReadStreamAsync(uri.ToString(), json, "application/json", options.TimeoutSeconds, headers);
-            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(streamResp.Token, cancellationToken);
-            var token = linkedCts.Token;
-
-            var response = streamResp.Response;
-            if (!response.IsSuccessStatusCode)
+            var lease = await BeginGovernedCallAsync(scene, resolved.Provider, resolved.Model, json, options.MaxTokens, true);
+            AiCallOutcome outcome = null;
+            try
             {
-                var errBody = await response.Content.ReadAsStringAsync(token);
-                Logger.LogError("AI 流式请求失败 status={Status} uri={Uri} model={Model} body={Body}",
-                    (int)response.StatusCode, uri, resolved.Model, TruncateForLog(errBody, 400));
-                // 与 ChatWithToolsAsync 的 EnsureNoProviderError 对齐：细节只写日志，上抛固定文案
-                throw new HttpRequestException("AI 服务调用失败，请稍后重试或检查 AI 配置");
-            }
+                using var streamResp = await HttpHelper.HttpPostReadStreamAsync(uri.ToString(), json, "application/json", options.TimeoutSeconds, headers);
+                using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(streamResp.Token, cancellationToken);
+                var token = linkedCts.Token;
+
+                var response = streamResp.Response;
+                var providerRequestId = HttpHelper.ReadRequestId(response);
+                if (!response.IsSuccessStatusCode)
+                {
+                    var errBody = await response.Content.ReadAsStringAsync(token);
+                    outcome = Failed("http", "http_error", TryReadProviderErrorMessage(errBody),
+                        (int)response.StatusCode, providerRequestId);
+                    Logger.LogError("AI 流式请求失败 status={Status} uri={Uri} model={Model} body={Body}",
+                        (int)response.StatusCode, uri, resolved.Model, TruncateForLog(errBody, 400));
+                    throw new HttpRequestException("AI 服务调用失败，请稍后重试或检查 AI 配置");
+                }
 
             var content = new StringBuilder();
             string finishReason = null;
@@ -503,8 +524,12 @@ namespace Infrastructure.AI
                 {
                     if (cancellationToken.IsCancellationRequested)
                     {
+                        outcome = Failed("cancelled", "client_cancelled", "客户端取消了 AI 流式请求",
+                            (int)response.StatusCode, providerRequestId);
                         throw;
                     }
+                    outcome = Failed("timeout", "timeout", "AI 流式响应超时",
+                        (int)response.StatusCode, providerRequestId);
                     throw new HttpRequestException("AI 流式响应超时，连接已中断，请重试");
                 }
                 if (read <= 0) break;
@@ -544,6 +569,8 @@ namespace Infrastructure.AI
                                 if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("error", out _))
                                 {
                                     var msg = TryReadProviderErrorMessage(data);
+                                    outcome = Failed("provider", "provider_error", msg,
+                                        (int)response.StatusCode, providerRequestId);
                                     Logger.LogError("AI 流式返回错误：{Message}", msg);
                                     throw new HttpRequestException("AI 服务调用失败，请稍后重试或检查 AI 配置");
                                 }
@@ -604,7 +631,11 @@ namespace Infrastructure.AI
                                                 && fn.TryGetProperty("name", out var nEl) && nEl.ValueKind == JsonValueKind.String)
                                             {
                                                 var nameVal = nEl.GetString();
-                                                if (!string.IsNullOrWhiteSpace(nameVal)) acc.Name = nameVal;
+                                                if (!string.IsNullOrWhiteSpace(nameVal))
+                                                {
+                                                    acc.Name = nameVal;
+                                                    yield return new AiStreamChunk { Type = "tool", Text = nameVal };
+                                                }
                                             }
                                             if (fn.TryGetProperty("arguments", out var aEl) && aEl.ValueKind == JsonValueKind.String)
                                             {
@@ -628,6 +659,17 @@ namespace Infrastructure.AI
                 }
             }
 
+            if (!done && string.IsNullOrWhiteSpace(finishReason))
+            {
+                outcome = Failed("failed", "stream_interrupted", "AI 流式连接未正常结束",
+                    (int)response.StatusCode, providerRequestId);
+                outcome.PromptTokens = promptTokens;
+                outcome.CompletionTokens = completionTokens;
+                outcome.TotalTokens = totalTokens > 0 ? totalTokens : promptTokens + completionTokens;
+                outcome.HasUsage = promptTokens > 0 || completionTokens > 0 || totalTokens > 0;
+                throw new HttpRequestException("AI 流式响应中断，请重试");
+            }
+
             var toolCalls = toolAcc.Values
                 .Where(b => !string.IsNullOrWhiteSpace(b.Name) || b.Args.Length > 0)
                 .Select(b => new ToolCall { Id = b.Id, Name = b.Name, Arguments = b.Args.ToString() })
@@ -635,7 +677,6 @@ namespace Infrastructure.AI
 
             Logger.LogInformation("AI token usage [provider={Provider}, model={Model}, scene={Scene}] 输入(prompt)={PromptTokens} 输出(completion)={CompletionTokens} 合计(total)={TotalTokens}",
                 resolved.Provider, resolved.Model, scene, promptTokens, completionTokens, totalTokens);
-            await ReportUsageAsync(scene, resolved.Provider, resolved.Model, promptTokens, completionTokens, totalTokens);
 
             var result = new ChatToolResult
             {
@@ -649,10 +690,23 @@ namespace Infrastructure.AI
 
             if (string.IsNullOrWhiteSpace(result.Content) && (result.ToolCalls == null || result.ToolCalls.Count == 0))
             {
+                outcome = Failed("parse", "unusable_response", "AI 服务响应无可用内容",
+                    (int)response.StatusCode, providerRequestId);
                 Logger.LogError("AI 流式响应无可用内容（无 content 且无 tool_calls）。uri={Uri}, model={Model}", uri, resolved.Model);
                 throw new HttpRequestException("AI 服务返回了无法解析的响应，请稍后重试或联系管理员");
             }
+            outcome = Succeeded((promptTokens, completionTokens, totalTokens),
+                (int)response.StatusCode, providerRequestId,
+                promptTokens > 0 || completionTokens > 0 || totalTokens > 0);
             yield return new AiStreamChunk { Type = "finish", Result = result };
+            }
+            finally
+            {
+                outcome ??= Failed(cancellationToken.IsCancellationRequested ? "cancelled" : "failed",
+                    cancellationToken.IsCancellationRequested ? "client_cancelled" : "stream_interrupted",
+                    cancellationToken.IsCancellationRequested ? "客户端取消了 AI 流式请求" : "AI 流式请求未正常完成");
+                await CompleteGovernedCallAsync(lease, outcome);
+            }
         }
 
         /// <summary>
@@ -664,6 +718,76 @@ namespace Infrastructure.AI
             public string Name { get; set; }
             public readonly StringBuilder Args = new StringBuilder();
         }
+
+        private static async Task<AiCallLease> BeginGovernedCallAsync(
+            string scene, string provider, string model, string payload, int maxTokens, bool isStream)
+        {
+            var governance = App.GetService<IAiCallGovernance>();
+            if (governance == null) return null;
+            return await governance.BeginAsync(new AiCallRequest
+            {
+                Scene = scene,
+                Provider = provider,
+                Model = model,
+                EstimatedPromptTokens = string.IsNullOrEmpty(payload) ? 0 : Math.Max(1, payload.Length / 4),
+                MaxCompletionTokens = Math.Max(0, maxTokens),
+                IsStream = isStream
+            });
+        }
+
+        private static async Task CompleteGovernedCallAsync(AiCallLease lease, AiCallOutcome outcome)
+        {
+            if (lease == null) return;
+            try
+            {
+                var governance = App.GetService<IAiCallGovernance>();
+                if (governance != null)
+                {
+                    await governance.CompleteAsync(lease, outcome ?? Failed("failed", "unknown", "AI 调用未正常完成"));
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "AI 调用治理结算失败 requestId={RequestId}", lease.RequestId);
+            }
+        }
+
+        private static AiCallOutcome Succeeded(
+            (int Prompt, int Completion, int Total) usage, int? statusCode, string requestId, bool? hasUsage = null) =>
+            new()
+            {
+                Success = true,
+                Status = "success",
+                HttpStatusCode = statusCode,
+                ProviderRequestId = requestId,
+                PromptTokens = usage.Prompt,
+                CompletionTokens = usage.Completion,
+                TotalTokens = usage.Total > 0 ? usage.Total : usage.Prompt + usage.Completion,
+                HasUsage = hasUsage ?? (usage.Prompt > 0 || usage.Completion > 0 || usage.Total > 0)
+            };
+
+        private static AiCallOutcome Failed(
+            string status, string errorType, string message, int? statusCode = null, string requestId = null) =>
+            new()
+            {
+                Success = false,
+                Status = status,
+                ErrorType = errorType,
+                ErrorMessage = TruncateForLog(message, 1000),
+                HttpStatusCode = statusCode,
+                ProviderRequestId = requestId
+            };
+
+        private static bool HasProviderError(JsonElement root) =>
+            root.ValueKind == JsonValueKind.Object && root.TryGetProperty("error", out _);
+
+        private static string ClassifyError(Exception ex) => ex switch
+        {
+            AiGovernanceDeniedException denied => denied.Reason,
+            JsonException => "parse_error",
+            HttpRequestException => "http_request",
+            _ => "unexpected"
+        };
 
         private static string TruncateForLog(string text, int maxLen)
         {

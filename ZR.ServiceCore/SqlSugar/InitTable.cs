@@ -21,6 +21,11 @@ namespace ZR.ServiceCore.SqlSugar
 
             // 核心：显式注册表实体 → 差异检测 → CodeFirst 迁移（逐个容错）→ 报告输出 + 历史记录
             var report = DbMigrationService.Migrate(db);
+            if (!report.Success)
+            {
+                throw new InvalidOperationException(
+                    $"数据库迁移存在 {report.FailedEntities.Count} 项失败：{string.Join("；", report.FailedEntities.Take(5))}");
+            }
 
             if (report.Success)
             {

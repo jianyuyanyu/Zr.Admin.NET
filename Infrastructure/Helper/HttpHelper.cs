@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
@@ -79,6 +80,64 @@ namespace Infrastructure
 
             using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = httpContent };
             return await SendAsync(request, timeOut, headers);
+        }
+
+        public sealed class HttpTextResponse
+        {
+            public string Content { get; set; }
+            public int StatusCode { get; set; }
+            public string RequestId { get; set; }
+            public bool IsSuccessStatusCode { get; set; }
+        }
+
+        /// <summary>
+        /// AI 等需要审计 HTTP 状态与 Provider 请求 ID 的详细 POST。
+        /// 保留原 HttpPostAsync 行为，避免影响其他调用方。
+        /// </summary>
+        public static async Task<HttpTextResponse> HttpPostDetailedAsync(
+            string url, string postData = null, string contentType = null, int timeOut = 30,
+            Dictionary<string, string> headers = null, CancellationToken cancellationToken = default)
+        {
+            postData ??= "";
+            using var httpContent = new StringContent(postData, Encoding.UTF8);
+            if (contentType != null)
+                httpContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
+            using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = httpContent };
+            if (headers != null)
+            {
+                foreach (var header in headers)
+                {
+                    if (!request.Content?.Headers.TryAddWithoutValidation(header.Key, header.Value) ?? false)
+                    {
+                        request.Headers.TryAddWithoutValidation(header.Key, header.Value);
+                    }
+                }
+            }
+
+            using var timeoutCts = new CancellationTokenSource(Math.Max(1, timeOut) * 1000);
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, cancellationToken);
+            using var response = await SharedClient.SendAsync(request, linkedCts.Token);
+            var body = await response.Content.ReadAsStringAsync(linkedCts.Token);
+            return new HttpTextResponse
+            {
+                Content = body,
+                StatusCode = (int)response.StatusCode,
+                IsSuccessStatusCode = response.IsSuccessStatusCode,
+                RequestId = ReadRequestId(response)
+            };
+        }
+
+        public static string ReadRequestId(HttpResponseMessage response)
+        {
+            if (response == null) return null;
+            foreach (var name in new[] { "x-request-id", "request-id", "x-trace-id", "trace-id" })
+            {
+                if (response.Headers.TryGetValues(name, out var values))
+                {
+                    return values.FirstOrDefault();
+                }
+            }
+            return null;
         }
 
         /// <summary>

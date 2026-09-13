@@ -393,15 +393,19 @@ namespace ZR.Workflow.Service
             if (action != (int)WfAction.Submit && action != (int)WfAction.Cc && action != (int)WfAction.AutoSkip)
             {
                 var nodeName = GetNodeNameSafe(nodeId);
-                _ = GenerateRecordSummaryAsync(record.RecordId, instanceId, nodeName, opinion);
+                var tenantId = global::Infrastructure.App.GetCurrentTenantId();
+                _ = GenerateRecordSummaryAsync(record.RecordId, instanceId, nodeName, opinion, tenantId, op.UserId, op.UserName);
             }
         }
 
         /// <summary>
         /// 异步生成审批记录 AI 摘要并写回（fire-and-forget，异常吞掉不影响主流程）
         /// </summary>
-        private async Task GenerateRecordSummaryAsync(long recordId, long instanceId, string nodeName, string opinion)
+        private async Task GenerateRecordSummaryAsync(
+            long recordId, long instanceId, string nodeName, string opinion,
+            string tenantId, long operatorId, string operatorName)
         {
+            using var actorScope = new global::Infrastructure.AI.AiCallActorScope(tenantId, operatorId, operatorName);
             try
             {
                 var inst = await Context.Queryable<WfFlowInstance>()
