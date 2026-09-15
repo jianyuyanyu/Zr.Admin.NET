@@ -26,6 +26,32 @@ namespace ZR.Model.AI.Dto
         public string Remark { get; set; }
     }
 
+    public class AiPolicyListDto
+    {
+        public long Id { get; set; }
+        public string ScopeType { get; set; }
+        public string TenantId { get; set; }
+        public string TenantName { get; set; }
+        public long SubjectId { get; set; }
+        public string SubjectName { get; set; }
+        public string Scene { get; set; }
+        public int? IsEnabled { get; set; }
+        public long? DailyTokenLimit { get; set; }
+        public long? MonthlyTokenLimit { get; set; }
+        public decimal? DailyAmountLimit { get; set; }
+        public decimal? MonthlyAmountLimit { get; set; }
+        public int? ConcurrentLimit { get; set; }
+        public int Status { get; set; }
+        public string Remark { get; set; }
+    }
+
+    public class AiPolicySubjectDto
+    {
+        public long Id { get; set; }
+        public string Name { get; set; }
+        public string Extra { get; set; }
+    }
+
     public class AiModelPriceQueryDto : PagerInfo
     {
         public string Provider { get; set; }

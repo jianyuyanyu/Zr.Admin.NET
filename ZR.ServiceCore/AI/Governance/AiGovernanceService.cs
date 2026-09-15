@@ -7,6 +7,7 @@ using System.Diagnostics;
 using ZR.Model;
 using ZR.Model.AI;
 using ZR.Model.AI.Dto;
+using ZR.Model.System.Tenant;
 using ZR.ServiceCore.AI.IService;
 using ZR.ServiceCore.Services;
 
@@ -19,22 +20,19 @@ namespace ZR.ServiceCore.AI.Governance
             { "global", "tenant", "role", "user" };
         private readonly IAiCallGovernance _callGovernance;
         private readonly ISysRoleService _roleService;
-        private readonly ISysUserService _userService;
         private readonly AiOptions _options;
 
         public AiGovernanceService(
             IAiCallGovernance callGovernance,
             ISysRoleService roleService,
-            ISysUserService userService,
             IOptions<OptionsSetting> options)
         {
             _callGovernance = callGovernance;
             _roleService = roleService;
-            _userService = userService;
             _options = options.Value?.AiOptions ?? new AiOptions();
         }
 
-        public PagedInfo<AiAccessPolicy> GetPolicyList(AiPolicyQueryDto query)
+        public PagedInfo<AiPolicyListDto> GetPolicyList(AiPolicyQueryDto query)
         {
             EnsureManager();
             query ??= new AiPolicyQueryDto();
@@ -52,12 +50,12 @@ namespace ZR.ServiceCore.AI.Governance
                 .WhereIF(query.Status.HasValue, x => x.Status == query.Status.Value)
                 .OrderBy(x => x.Id, global::SqlSugar.OrderByType.Desc)
                 .ToPageList(pageNum, pageSize, ref total);
-            return new PagedInfo<AiAccessPolicy>
+            return new PagedInfo<AiPolicyListDto>
             {
                 PageIndex = pageNum,
                 PageSize = pageSize,
                 TotalNum = total,
-                Result = list
+                Result = FillPolicyNames(list)
             };
         }
 
@@ -67,6 +65,24 @@ namespace ZR.ServiceCore.AI.Governance
             var entity = Queryable().First(x => x.Id == id);
             AuthorizePolicy(entity);
             return entity;
+        }
+
+        public List<AiPolicySubjectDto> GetPolicySubjects(string scopeType, string keyword)
+        {
+            EnsureManager();
+            var key = (keyword ?? string.Empty).Trim();
+            if (string.Equals(scopeType, "role", StringComparison.OrdinalIgnoreCase))
+            {
+                return _roleService.Queryable()
+                    .Where(r => r.DelFlag == 0)
+                    .WhereIF(!string.IsNullOrEmpty(key), r => r.RoleName.Contains(key) || r.RoleKey.Contains(key))
+                    .OrderBy(r => r.RoleSort)
+                    .Take(200)
+                    .ToList()
+                    .Select(r => new AiPolicySubjectDto { Id = r.RoleId, Name = r.RoleName, Extra = r.RoleKey })
+                    .ToList();
+            }
+            return new List<AiPolicySubjectDto>();
         }
 
         public long SavePolicy(AiPolicySaveDto input)
@@ -380,8 +396,6 @@ namespace ZR.ServiceCore.AI.Governance
 
             if (input.ScopeType == "role" && _roleService.SelectRoleById(input.SubjectId) == null)
                 throw new CustomException("目标角色不存在");
-            if (input.ScopeType == "user" && _userService.SelectUserById(input.SubjectId) == null)
-                throw new CustomException("目标用户不存在");
         }
 
         private void AuthorizePolicy(AiAccessPolicy entity)
@@ -391,6 +405,55 @@ namespace ZR.ServiceCore.AI.Governance
             if (entity.TenantId != App.GetCurrentTenantId() || entity.ScopeType is "global" or "tenant")
                 throw new CustomException("无权访问该 AI 策略");
         }
+
+        private List<AiPolicyListDto> FillPolicyNames(List<AiAccessPolicy> list)
+        {
+            var dtos = (list ?? new List<AiAccessPolicy>()).Select(ToListDto).ToList();
+            if (dtos.Count == 0) return dtos;
+
+            var tenantIds = dtos.Select(x => x.TenantId).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().ToList();
+            var tenantMap = tenantIds.Count == 0
+                ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                : Context.Queryable<SysTenant>()
+                    .Where(t => tenantIds.Contains(t.TenantId))
+                    .ToList()
+                    .GroupBy(t => t.TenantId, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(g => g.Key, g => g.First().TenantName, StringComparer.OrdinalIgnoreCase);
+
+            var roleIds = dtos.Where(x => x.ScopeType == "role" && x.SubjectId > 0).Select(x => x.SubjectId).Distinct().ToList();
+            var roleMap = roleIds.Count == 0
+                ? new Dictionary<long, string>()
+                : _roleService.Queryable().Where(r => roleIds.Contains(r.RoleId)).ToList()
+                    .GroupBy(r => r.RoleId).ToDictionary(g => g.Key, g => g.First().RoleName);
+
+            foreach (var dto in dtos)
+            {
+                if (string.IsNullOrWhiteSpace(dto.TenantId)) dto.TenantName = "全局";
+                else if (tenantMap.TryGetValue(dto.TenantId, out var tenantName) && !string.IsNullOrWhiteSpace(tenantName))
+                    dto.TenantName = tenantName;
+
+                if (dto.ScopeType == "role" && roleMap.TryGetValue(dto.SubjectId, out var roleName))
+                    dto.SubjectName = roleName;
+            }
+            return dtos;
+        }
+
+        private static AiPolicyListDto ToListDto(AiAccessPolicy source) => new()
+        {
+            Id = source.Id,
+            ScopeType = source.ScopeType,
+            TenantId = source.TenantId,
+            SubjectId = source.SubjectId,
+            Scene = source.Scene,
+            IsEnabled = source.IsEnabled,
+            DailyTokenLimit = source.DailyTokenLimit,
+            MonthlyTokenLimit = source.MonthlyTokenLimit,
+            DailyAmountLimit = source.DailyAmountLimit,
+            MonthlyAmountLimit = source.MonthlyAmountLimit,
+            ConcurrentLimit = source.ConcurrentLimit,
+            Status = source.Status,
+            Remark = source.Remark
+        };
 
         private static void MapPolicy(AiPolicySaveDto source, AiAccessPolicy target)
         {

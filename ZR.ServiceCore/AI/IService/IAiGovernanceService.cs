@@ -6,8 +6,9 @@ namespace ZR.ServiceCore.AI.IService
 {
     public interface IAiGovernanceService
     {
-        PagedInfo<AiAccessPolicy> GetPolicyList(AiPolicyQueryDto query);
+        PagedInfo<AiPolicyListDto> GetPolicyList(AiPolicyQueryDto query);
         AiAccessPolicy GetPolicy(long id);
+        List<AiPolicySubjectDto> GetPolicySubjects(string scopeType, string keyword);
         long SavePolicy(AiPolicySaveDto input);
         int DeletePolicy(long id);
 
