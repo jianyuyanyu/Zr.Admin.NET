@@ -16,11 +16,30 @@ namespace ZR.Admin.WebApi.Controllers.AI
     public class AiChatController : BaseController
     {
         private readonly ISysAiChatService _aiChatService;
+        private readonly IAiCallGovernance _callGovernance;
         private static readonly NLog.Logger _logger = NLog.LogManager.GetCurrentClassLogger();
 
-        public AiChatController(ISysAiChatService aiChatService)
+        public AiChatController(ISysAiChatService aiChatService, IAiCallGovernance callGovernance)
         {
             _aiChatService = aiChatService;
+            _callGovernance = callGovernance;
+        }
+
+        /// <summary>
+        /// 当前登录用户在指定场景下的额度快照（默认 ai_chat）。只读，不占并发。
+        /// </summary>
+        [HttpGet("quota")]
+        [ActionPermissionFilter(Permission = "common")]
+        public IActionResult Quota([FromQuery] string scene = "ai_chat")
+        {
+            try
+            {
+                return SUCCESS(_callGovernance.GetMyQuota(scene));
+            }
+            catch (Exception ex)
+            {
+                return ToResponse(ResultCode.FAIL, ex.Message);
+            }
         }
 
         /// <summary>

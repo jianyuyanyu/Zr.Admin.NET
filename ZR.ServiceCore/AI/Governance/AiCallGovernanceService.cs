@@ -92,13 +92,8 @@ namespace ZR.ServiceCore.AI.Governance
                 await RejectAsync(lease, "governance_unavailable", "AI 计量服务暂不可用，请稍后重试");
             }
 
-            var policies = GetPolicies(tenantId);
-            var globalLimits = ResolveConstraints(policies, "global", string.Empty, [0], scene);
-            var tenantLimits = ResolveConstraints(policies, "tenant", tenantId, [0], scene);
-            var roleLimits = ResolveConstraints(policies, "role", tenantId, roleIds, scene);
-            var userLimits = ResolveConstraints(policies, "user", tenantId, [userId], scene);
-            var subjectLimits = roleLimits.Concat(userLimits).ToList();
-            var allLimits = globalLimits.Concat(tenantLimits).Concat(subjectLimits).ToList();
+            var (globalLimits, tenantLimits, subjectLimits, allLimits) =
+                ResolvePolicyLayers(tenantId, userId, roleIds, scene);
 
             if (allLimits.Any(x => x.Disabled))
             {
@@ -107,17 +102,6 @@ namespace ZR.ServiceCore.AI.Governance
             if (price == null && allLimits.Any(x => x.HasAmountLimit))
             {
                 await RejectAsync(lease, "price_missing", "当前模型未配置单价，无法安全执行金额额度校验");
-            }
-
-            // 无数据库角色/用户额度时，兼容原 AI 聊天月 Token 默认值。
-            if (subjectLimits.Count == 0 && scene == "ai_chat" && _options.DefaultUserTotalTokens > 0)
-            {
-                subjectLimits.Add(new PolicyLimit
-                {
-                    HasPolicy = true,
-                    MonthlyTokenLimit = _options.DefaultUserTotalTokens,
-                    SceneFilter = "ai_chat"
-                });
             }
 
             await QuotaGate.WaitAsync();
@@ -290,6 +274,78 @@ namespace ZR.ServiceCore.AI.Governance
             }
             // IMemoryCache 不支持按前缀删除；版本号使所有既有项立即失效。
             PolicyCacheVersion++;
+        }
+
+        public AiQuotaSnapshot GetMyQuota(string scene = "ai_chat")
+        {
+            scene = Normalize(scene, "ai_chat").ToLowerInvariant();
+            var actor = AiCallActorScope.Current;
+            var tenantId = Normalize(actor?.TenantId, App.GetCurrentTenantId());
+            var user = App.HttpContext?.GetCurrentUser();
+            var userId = actor?.UserId > 0 ? actor.UserId : user?.UserId ?? 0;
+            var roleIds = user?.Roles?.Select(x => x.RoleId).ToArray() ?? Array.Empty<long>();
+
+            var snapshot = new AiQuotaSnapshot
+            {
+                Scene = scene,
+                Allowed = true,
+                Currency = "CNY"
+            };
+
+            if (!_options.Enable)
+            {
+                snapshot.Allowed = false;
+                snapshot.DeniedReason = "AI 功能当前已停用";
+                return snapshot;
+            }
+
+            var (_, _, _, allLimits) = ResolvePolicyLayers(tenantId, userId, roleIds, scene);
+
+            if (allLimits.Any(x => x.Disabled))
+            {
+                snapshot.Allowed = false;
+                snapshot.DeniedReason = "当前账号或场景未启用 AI 功能";
+            }
+
+            snapshot.DailyTokenLimit = Min(allLimits.Select(x => x.DailyTokenLimit));
+            snapshot.MonthlyTokenLimit = Min(allLimits.Select(x => x.MonthlyTokenLimit));
+            snapshot.DailyAmountLimit = Min(allLimits.Select(x => x.DailyAmountLimit));
+            snapshot.MonthlyAmountLimit = Min(allLimits.Select(x => x.MonthlyAmountLimit));
+
+            var sceneFilter = allLimits.Any(x => !string.IsNullOrWhiteSpace(x.SceneFilter) && x.SceneFilter != "*")
+                ? scene
+                : "*";
+            var lease = new AiCallLease { TenantId = tenantId, UserId = userId };
+            var now = DateTime.Now;
+            var dayUsage = GetUsage(lease, $"user:{tenantId}:{userId}", sceneFilter, now.Date);
+            var monthUsage = GetUsage(lease, $"user:{tenantId}:{userId}", sceneFilter, new DateTime(now.Year, now.Month, 1));
+            snapshot.DailyTokenUsed = dayUsage.Tokens;
+            snapshot.DailyAmountUsed = dayUsage.Amount;
+            snapshot.MonthlyTokenUsed = monthUsage.Tokens;
+            snapshot.MonthlyAmountUsed = monthUsage.Amount;
+            return snapshot;
+        }
+
+        private (List<PolicyLimit> Global, List<PolicyLimit> Tenant, List<PolicyLimit> Subject, List<PolicyLimit> All)
+            ResolvePolicyLayers(string tenantId, long userId, IReadOnlyList<long> roleIds, string scene)
+        {
+            var policies = GetPolicies(tenantId);
+            var globalLimits = ResolveConstraints(policies, "global", string.Empty, [0], scene);
+            var tenantLimits = ResolveConstraints(policies, "tenant", tenantId, [0], scene);
+            var roleLimits = ResolveConstraints(policies, "role", tenantId, roleIds, scene);
+            var userLimits = ResolveConstraints(policies, "user", tenantId, [userId], scene);
+            var subjectLimits = roleLimits.Concat(userLimits).ToList();
+            if (subjectLimits.Count == 0 && scene == "ai_chat" && _options.DefaultUserTotalTokens > 0)
+            {
+                subjectLimits.Add(new PolicyLimit
+                {
+                    HasPolicy = true,
+                    MonthlyTokenLimit = _options.DefaultUserTotalTokens,
+                    SceneFilter = "ai_chat"
+                });
+            }
+            var allLimits = globalLimits.Concat(tenantLimits).Concat(subjectLimits).ToList();
+            return (globalLimits, tenantLimits, subjectLimits, allLimits);
         }
 
         private static int PolicyCacheVersion;

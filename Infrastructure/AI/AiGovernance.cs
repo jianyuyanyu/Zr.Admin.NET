@@ -56,11 +56,29 @@ namespace Infrastructure.AI
         public bool HasUsage { get; set; }
     }
 
+    /// <summary>当前登录用户在指定场景下的额度快照（只读，不占并发、不写流水）。</summary>
+    public sealed class AiQuotaSnapshot
+    {
+        public bool Allowed { get; set; } = true;
+        public string Scene { get; set; }
+        public string DeniedReason { get; set; }
+        public long DailyTokenUsed { get; set; }
+        public long? DailyTokenLimit { get; set; }
+        public long MonthlyTokenUsed { get; set; }
+        public long? MonthlyTokenLimit { get; set; }
+        public decimal DailyAmountUsed { get; set; }
+        public decimal? DailyAmountLimit { get; set; }
+        public decimal MonthlyAmountUsed { get; set; }
+        public decimal? MonthlyAmountLimit { get; set; }
+        public string Currency { get; set; } = "CNY";
+    }
+
     public interface IAiCallGovernance
     {
         Task<AiCallLease> BeginAsync(AiCallRequest request);
         Task CompleteAsync(AiCallLease lease, AiCallOutcome outcome);
         void InvalidatePolicyCache(string tenantId = null);
+        AiQuotaSnapshot GetMyQuota(string scene = "ai_chat");
     }
 
     public sealed class AiGovernanceDeniedException : InvalidOperationException
