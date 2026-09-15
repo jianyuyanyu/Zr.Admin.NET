@@ -52,6 +52,23 @@ namespace ZR.Admin.WebApi.Controllers.AI
             return SUCCESS(_aiUsageService.GetList(parm, isAdmin: true));
         }
 
+        /// <summary>
+        /// 【管理】导出调用流水（当前筛选，最多 10000 条）
+        /// </summary>
+        [HttpGet("export")]
+        [ActionPermissionFilter(Permission = "ai:usage:export")]
+        [Log(Title = "AI用量", BusinessType = BusinessType.EXPORT, IsSaveResponseData = false)]
+        public IActionResult Export([FromQuery] AiUsageQueryDto parm)
+        {
+            var list = _aiUsageService.GetExportList(parm, isAdmin: true);
+            if (list == null || list.Count <= 0)
+            {
+                return ToResponse(ResultCode.FAIL, "没有要导出的数据");
+            }
+            var result = ExportExcelMini(list, "AI用量流水", "AI用量流水");
+            return ExportExcel(result.Item2, result.Item1);
+        }
+
         #endregion
 
         #region 个人视角（仅本人）
@@ -75,6 +92,23 @@ namespace ZR.Admin.WebApi.Controllers.AI
         public IActionResult MyList([FromQuery] AiUsageQueryDto parm)
         {
             return SUCCESS(_aiUsageService.GetList(parm, isAdmin: false));
+        }
+
+        /// <summary>
+        /// 【个人】导出本人调用流水（当前筛选，最多 10000 条）
+        /// </summary>
+        [HttpGet("my/export")]
+        [ActionPermissionFilter(Permission = "ai:usage:mine")]
+        [Log(Title = "我的AI用量", BusinessType = BusinessType.EXPORT, IsSaveResponseData = false)]
+        public IActionResult MyExport([FromQuery] AiUsageQueryDto parm)
+        {
+            var list = _aiUsageService.GetExportList(parm, isAdmin: false);
+            if (list == null || list.Count <= 0)
+            {
+                return ToResponse(ResultCode.FAIL, "没有要导出的数据");
+            }
+            var result = ExportExcelMini(list, "我的AI用量", "我的AI用量");
+            return ExportExcel(result.Item2, result.Item1);
         }
 
         #endregion

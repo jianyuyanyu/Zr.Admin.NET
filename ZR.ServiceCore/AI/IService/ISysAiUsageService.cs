@@ -25,5 +25,10 @@ namespace ZR.ServiceCore.AI.IService
         /// 调用流水分页（创建时间倒序）
         /// </summary>
         PagedInfo<AiUsageLogDto> GetList(AiUsageQueryDto parm, bool isAdmin);
+
+        /// <summary>
+        /// 导出调用流水（与列表同一筛选，最多 10000 条）
+        /// </summary>
+        List<AiUsageLogDto> GetExportList(AiUsageQueryDto parm, bool isAdmin);
     }
 }

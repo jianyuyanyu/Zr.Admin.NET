@@ -187,32 +187,47 @@ namespace ZR.ServiceCore.AI
                 PageIndex = page.PageIndex,
                 PageSize = page.PageSize,
                 TotalNum = page.TotalNum,
-                Result = page.Result?.Select(m => new AiUsageLogDto
-                {
-                    Scene = m.Scene,
-                    Provider = m.Provider,
-                    Model = m.Model,
-                    TenantId = m.TenantId,
-                    RequestId = m.RequestId,
-                    TraceId = m.TraceId,
-                    Success = m.Success,
-                    Status = m.Status,
-                    ErrorType = m.ErrorType,
-                    HttpStatusCode = m.HttpStatusCode,
-                    DurationMs = m.DurationMs,
-                    ProviderRequestId = m.ProviderRequestId,
-                    IsStream = m.IsStream == 1,
-                    PromptTokens = m.PromptTokens,
-                    CompletionTokens = m.CompletionTokens,
-                    TotalTokens = m.TotalTokens,
-                    EstimatedAmount = m.EstimatedAmount,
-                    Currency = m.Currency,
-                    UserName = m.UserName,
-                    ErrorMsg = m.ErrorMsg,
-                    CreateTime = m.CreateTime
-                }).ToList()
+                Result = page.Result?.Select(MapLog).ToList()
             };
         }
+
+        public List<AiUsageLogDto> GetExportList(AiUsageQueryDto parm, bool isAdmin)
+        {
+            EnsureUsageAccess(isAdmin);
+            var (begin, end) = ResolveRange(parm);
+            return Queryable()
+                .Where(BuildWhere(parm, isAdmin, begin, end))
+                .OrderBy(m => m.CreateTime, OrderByType.Desc)
+                .Take(10000)
+                .ToList()
+                .Select(MapLog)
+                .ToList();
+        }
+
+        private static AiUsageLogDto MapLog(AiCallLog m) => new()
+        {
+            Scene = m.Scene,
+            Provider = m.Provider,
+            Model = m.Model,
+            TenantId = m.TenantId,
+            RequestId = m.RequestId,
+            TraceId = m.TraceId,
+            Success = m.Success,
+            Status = m.Status,
+            ErrorType = m.ErrorType,
+            HttpStatusCode = m.HttpStatusCode,
+            DurationMs = m.DurationMs,
+            ProviderRequestId = m.ProviderRequestId,
+            IsStream = m.IsStream == 1,
+            PromptTokens = m.PromptTokens,
+            CompletionTokens = m.CompletionTokens,
+            TotalTokens = m.TotalTokens,
+            EstimatedAmount = m.EstimatedAmount,
+            Currency = m.Currency,
+            UserName = m.UserName,
+            ErrorMsg = m.ErrorMsg,
+            CreateTime = m.CreateTime
+        };
 
         private static (DateTime Begin, DateTime End) ResolveRange(AiUsageQueryDto parm)
         {

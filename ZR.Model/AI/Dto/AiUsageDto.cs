@@ -135,36 +135,63 @@ namespace ZR.Model.AI.Dto
     /// </summary>
     public class AiUsageLogDto
     {
-        public string Scene { get; set; }
+        [ExcelColumn(Name = "调用时间", Format = "yyyy-MM-dd HH:mm:ss", Width = 20, Index = 0)]
+        public DateTime? CreateTime { get; set; }
 
-        public string Provider { get; set; }
-
-        public string Model { get; set; }
-        public string TenantId { get; set; }
-        public string RequestId { get; set; }
-        public string TraceId { get; set; }
-        public int? Success { get; set; }
-        public string Status { get; set; }
-        public string ErrorType { get; set; }
-        public int? HttpStatusCode { get; set; }
-        public long DurationMs { get; set; }
-        public string ProviderRequestId { get; set; }
-        public bool IsStream { get; set; }
-
-        public int PromptTokens { get; set; }
-
-        public int CompletionTokens { get; set; }
-
-        public int TotalTokens { get; set; }
-        public decimal EstimatedAmount { get; set; }
-        public string Currency { get; set; }
-
-        /// <summary>触发用户（后台任务无登录上下文时为空）</summary>
+        [ExcelColumn(Name = "用户", Width = 16, Index = 1)]
         public string UserName { get; set; }
 
-        /// <summary>异常信息（成功调用为空）</summary>
+        [ExcelColumn(Name = "租户", Width = 14, Index = 2)]
+        public string TenantId { get; set; }
+
+        [ExcelColumn(Name = "场景", Width = 18, Index = 3)]
+        public string Scene { get; set; }
+
+        [ExcelColumn(Name = "Provider", Width = 14, Index = 4)]
+        public string Provider { get; set; }
+
+        [ExcelColumn(Name = "模型", Width = 24, Index = 5)]
+        public string Model { get; set; }
+
+        [ExcelColumn(Name = "状态", Width = 16, Index = 6)]
+        public string Status { get; set; }
+
+        [ExcelColumn(Name = "错误类型", Width = 16, Index = 7)]
+        public string ErrorType { get; set; }
+
+        [ExcelColumn(Name = "HTTP 状态", Width = 12, Index = 8)]
+        public int? HttpStatusCode { get; set; }
+
+        [ExcelColumn(Name = "耗时(ms)", Width = 12, Index = 9)]
+        public long DurationMs { get; set; }
+
+        [ExcelColumn(Name = "输入 Token", Width = 12, Index = 10)]
+        public int PromptTokens { get; set; }
+
+        [ExcelColumn(Name = "输出 Token", Width = 12, Index = 11)]
+        public int CompletionTokens { get; set; }
+
+        [ExcelColumn(Name = "合计 Token", Width = 12, Index = 12)]
+        public int TotalTokens { get; set; }
+
+        [ExcelColumn(Name = "金额", Width = 14, Index = 13)]
+        public decimal EstimatedAmount { get; set; }
+
+        [ExcelColumn(Name = "请求 ID", Width = 28, Index = 14)]
+        public string RequestId { get; set; }
+
+        [ExcelColumn(Name = "错误信息", Width = 40, Index = 15)]
         public string ErrorMsg { get; set; }
 
-        public DateTime? CreateTime { get; set; }
+        [ExcelIgnore]
+        public string TraceId { get; set; }
+        [ExcelIgnore]
+        public int? Success { get; set; }
+        [ExcelIgnore]
+        public string ProviderRequestId { get; set; }
+        [ExcelIgnore]
+        public bool IsStream { get; set; }
+        [ExcelIgnore]
+        public string Currency { get; set; }
     }
 }

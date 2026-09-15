@@ -32,7 +32,10 @@ namespace ZR.ServiceCore.Services
             Component: "Ai/AiUsage",
             Perms: "ai:usage:list",
             OrderNum: 1,
-            Buttons: [],
+            Buttons:
+            [
+                new SeedButton("用量导出", "ai:usage:export", OrderNum: 20),
+            ],
             Icon: "chart");
 
         private static readonly SeedPage AiGovernancePage = new(
