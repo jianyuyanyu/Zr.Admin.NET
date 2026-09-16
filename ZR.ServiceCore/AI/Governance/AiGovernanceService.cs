@@ -220,7 +220,6 @@ namespace ZR.ServiceCore.AI.Governance
 
         public AiModelCatalogDto GetCatalog()
         {
-            EnsureCatalogAccess();
             var map = new Dictionary<string, SortedSet<string>>(StringComparer.OrdinalIgnoreCase);
             var labels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -261,14 +260,13 @@ namespace ZR.ServiceCore.AI.Governance
 
             return new AiModelCatalogDto
             {
-                Providers = map.OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase)
+                Providers = [.. map.OrderBy(x => x.Key, StringComparer.OrdinalIgnoreCase)
                     .Select(x => new AiProviderOptionDto
                     {
                         Provider = x.Key.ToLowerInvariant(),
                         Label = labels.TryGetValue(x.Key, out var label) ? $"{label}（{x.Key}）" : x.Key,
-                        Models = x.Value.ToList()
-                    })
-                    .ToList()
+                        Models = [.. x.Value]
+                    })]
             };
         }
 
@@ -494,13 +492,6 @@ namespace ZR.ServiceCore.AI.Governance
             var delegated = user?.Permissions?.Any(x => x.StartsWith("ai:governance:", StringComparison.OrdinalIgnoreCase)) == true;
             if (user == null || (user.IsAdmin() != true && !delegated))
                 throw new CustomException("当前账号没有 AI 治理管理权限");
-        }
-
-        private static void EnsureCatalogAccess()
-        {
-            var user = App.HttpContext?.GetCurrentUser();
-            if (user == null || user.UserId <= 0)
-                throw new CustomException("当前账号没有查看 AI 模型目录的权限");
         }
 
         private static string MaskUrl(string value)

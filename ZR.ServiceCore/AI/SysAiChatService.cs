@@ -703,7 +703,7 @@ namespace ZR.ServiceCore.AI
         }
 
         /// <summary>
-        /// 
+        /// 解析会话：新会话则创建，会话ID>0则查询并验证归属
         /// </summary>
         /// <param name="sessionId"></param>
         /// <param name="userId"></param>
@@ -765,6 +765,11 @@ namespace ZR.ServiceCore.AI
             roundDiag.Add($"r{round + 1}:finish={turn.FinishReason ?? "null"},contentLen={contentLen},tools=[{string.Join(",", toolNames)}]");
         }
 
+        /// <summary>
+        /// 把模型返回的助手消息和工具调用信息追加到消息列表中，供下一轮模型调用使用。
+        /// </summary>
+        /// <param name="messages">消息列表</param>
+        /// <param name="turn">模型返回的助手消息和工具调用信息</param>
         private static void AppendAssistantToolCalls(List<object> messages, AiLlmClient.ChatToolResult turn)
         {
             messages.Add(new
@@ -780,6 +785,13 @@ namespace ZR.ServiceCore.AI
             });
         }
 
+        /// <summary>
+        /// 把工具执行结果追加到消息列表中，供下一轮模型调用使用。
+        /// </summary>
+        /// <param name="messages"></param>
+        /// <param name="toolCallId"></param>
+        /// <param name="exec"></param>
+        /// <param name="chartQueries"></param>
         private static void AppendToolResult(List<object> messages, string toolCallId, AiToolExecResult exec, List<AiChartQueryResult> chartQueries)
         {
             var content = exec.Content ?? "";
@@ -794,6 +806,13 @@ namespace ZR.ServiceCore.AI
             messages.Add(new { role = "tool", tool_call_id = toolCallId, content = AiHelper.ClipText(content, ToolResultMaxLen) });
         }
 
+        /// <summary>
+        /// 安全执行工具：捕获异常并记录日志，避免内部异常细节透给前端。
+        /// </summary>
+        /// <param name="call"></param>
+        /// <param name="userId"></param>
+        /// <param name="sessionId"></param>
+        /// <returns></returns>
         private async Task<AiToolExecResult> ExecuteToolSafelyAsync(AiLlmClient.ToolCall call, long userId, long sessionId)
         {
             try

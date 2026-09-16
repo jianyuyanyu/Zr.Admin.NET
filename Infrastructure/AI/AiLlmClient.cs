@@ -453,6 +453,10 @@ namespace Infrastructure.AI
         /// 流式(SSE)版 ChatWithToolsAsync：OpenAI 兼容 stream=true 的"单轮"对话。
         /// 上层自行控制纠错轮次与工具结果回灌（每轮迭代到 finish 后判断 ToolCalls）。
         /// 迭代中逐块 yield delta；HTTP/解析/服务错误直接抛 HttpRequestException，由上层决定展示策略。
+        /// <paramref name="messages"/> 为完整消息数组（含 system/user/assistant/tool），<paramref name="tools"/> 为 function 描述数组。
+        /// <paramref name="options"/> 控制模型、温度、token 限制、超时等；<paramref name="scene"/> 用于调用治理。
+        /// <paramref name="tools"/>
+        /// <paramref name="options"/>
         /// </summary>
         public static async IAsyncEnumerable<AiStreamChunk> StreamChatWithToolsAsync(AiOptions options, object[] messages, object[] tools, string scene = null, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
@@ -502,203 +506,203 @@ namespace Infrastructure.AI
                     throw new HttpRequestException("AI 服务调用失败，请稍后重试或检查 AI 配置");
                 }
 
-            var content = new StringBuilder();
-            string finishReason = null;
-            var toolAcc = new Dictionary<int, ToolCallBuilder>();
-            var promptTokens = 0;
-            var completionTokens = 0;
-            var totalTokens = 0;
+                var content = new StringBuilder();
+                string finishReason = null;
+                var toolAcc = new Dictionary<int, ToolCallBuilder>();
+                var promptTokens = 0;
+                var completionTokens = 0;
+                var totalTokens = 0;
 
-            await using var stream = await response.Content.ReadAsStreamAsync(token);
-            var buffer = new byte[8192];
-            var lineBytes = new MemoryStream();
-            var done = false;
-            while (!done)
-            {
-                int read;
-                try
+                await using var stream = await response.Content.ReadAsStreamAsync(token);
+                var buffer = new byte[8192];
+                var lineBytes = new MemoryStream();
+                var done = false;
+                while (!done)
                 {
-                    read = await stream.ReadAsync(buffer, 0, buffer.Length, token);
-                }
-                catch (OperationCanceledException)
-                {
-                    if (cancellationToken.IsCancellationRequested)
+                    int read;
+                    try
                     {
-                        outcome = Failed("cancelled", "client_cancelled", "客户端取消了 AI 流式请求",
-                            (int)response.StatusCode, providerRequestId);
-                        throw;
+                        read = await stream.ReadAsync(buffer, 0, buffer.Length, token);
                     }
-                    outcome = Failed("timeout", "timeout", "AI 流式响应超时",
-                        (int)response.StatusCode, providerRequestId);
-                    throw new HttpRequestException("AI 流式响应超时，连接已中断，请重试");
-                }
-                if (read <= 0) break;
-
-                for (var i = 0; i < read && !done; i++)
-                {
-                    if (buffer[i] == (byte)'\n')
+                    catch (OperationCanceledException)
                     {
-                        var line = Encoding.UTF8.GetString(lineBytes.GetBuffer(), 0, (int)lineBytes.Length).Trim();
-                        lineBytes.SetLength(0);
-                        if (line.Length == 0) continue;
-
-                        var data = line;
-                        if (data.StartsWith("data:", StringComparison.OrdinalIgnoreCase)) data = data.Substring(5).Trim();
-                        if (data.Length == 0 || data.StartsWith(":")) continue;
-                        if (data == "[DONE]")
+                        if (cancellationToken.IsCancellationRequested)
                         {
-                            done = true;
-                            break;
+                            outcome = Failed("cancelled", "client_cancelled", "客户端取消了 AI 流式请求",
+                                (int)response.StatusCode, providerRequestId);
+                            throw;
                         }
+                        outcome = Failed("timeout", "timeout", "AI 流式响应超时",
+                            (int)response.StatusCode, providerRequestId);
+                        throw new HttpRequestException("AI 流式响应超时，连接已中断，请重试");
+                    }
+                    if (read <= 0) break;
 
-                        if (data.StartsWith("{") || data.StartsWith("["))
+                    for (var i = 0; i < read && !done; i++)
+                    {
+                        if (buffer[i] == (byte)'\n')
                         {
-                            JsonDocument doc;
-                            try
+                            var line = Encoding.UTF8.GetString(lineBytes.GetBuffer(), 0, (int)lineBytes.Length).Trim();
+                            lineBytes.SetLength(0);
+                            if (line.Length == 0) continue;
+
+                            var data = line;
+                            if (data.StartsWith("data:", StringComparison.OrdinalIgnoreCase)) data = data.Substring(5).Trim();
+                            if (data.Length == 0 || data.StartsWith(":")) continue;
+                            if (data == "[DONE]")
                             {
-                                doc = JsonDocument.Parse(data);
+                                done = true;
+                                break;
                             }
-                            catch (JsonException)
+
+                            if (data.StartsWith("{") || data.StartsWith("["))
                             {
-                                // 个别不完整块忽略，等待后续行
-                                continue;
-                            }
-                            using (doc)
-                            {
-                                var root = doc.RootElement;
-                                if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("error", out _))
+                                JsonDocument doc;
+                                try
                                 {
-                                    var msg = TryReadProviderErrorMessage(data);
-                                    outcome = Failed("provider", "provider_error", msg,
-                                        (int)response.StatusCode, providerRequestId);
-                                    Logger.LogError("AI 流式返回错误：{Message}", msg);
-                                    throw new HttpRequestException("AI 服务调用失败，请稍后重试或检查 AI 配置");
+                                    doc = JsonDocument.Parse(data);
                                 }
-
-                                // usage 可能在最后一块与 choices 同场，或独立成块；后到覆盖
-                                var (p, c, t) = ReadUsageTokens(root, resolved.Provider);
-                                if (p > 0) promptTokens = p;
-                                if (c > 0) completionTokens = c;
-                                if (t > 0) totalTokens = t;
-
-                                if (!root.TryGetProperty("choices", out var choices) || choices.ValueKind != JsonValueKind.Array || choices.GetArrayLength() == 0)
+                                catch (JsonException)
                                 {
+                                    // 个别不完整块忽略，等待后续行
                                     continue;
                                 }
-                                var choice = choices[0];
-
-                                if (choice.TryGetProperty("finish_reason", out var frEl) && frEl.ValueKind == JsonValueKind.String)
+                                using (doc)
                                 {
-                                    var frVal = frEl.GetString();
-                                    if (!string.IsNullOrWhiteSpace(frVal)) finishReason = frVal;
-                                }
-
-                                if (!choice.TryGetProperty("delta", out var delta) || delta.ValueKind != JsonValueKind.Object)
-                                {
-                                    continue;
-                                }
-
-                                if (delta.TryGetProperty("content", out var cEl) && cEl.ValueKind == JsonValueKind.String)
-                                {
-                                    var txt = cEl.GetString() ?? string.Empty;
-                                    if (txt.Length > 0)
+                                    var root = doc.RootElement;
+                                    if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("error", out _))
                                     {
-                                        content.Append(txt);
-                                        yield return new AiStreamChunk { Type = "delta", Text = txt };
+                                        var msg = TryReadProviderErrorMessage(data);
+                                        outcome = Failed("provider", "provider_error", msg,
+                                            (int)response.StatusCode, providerRequestId);
+                                        Logger.LogError("AI 流式返回错误：{Message}", msg);
+                                        throw new HttpRequestException("AI 服务调用失败，请稍后重试或检查 AI 配置");
                                     }
-                                }
 
-                                if (delta.TryGetProperty("tool_calls", out var tcs) && tcs.ValueKind == JsonValueKind.Array)
-                                {
-                                    foreach (var tc in tcs.EnumerateArray())
+                                    // usage 可能在最后一块与 choices 同场，或独立成块；后到覆盖
+                                    var (p, c, t) = ReadUsageTokens(root, resolved.Provider);
+                                    if (p > 0) promptTokens = p;
+                                    if (c > 0) completionTokens = c;
+                                    if (t > 0) totalTokens = t;
+
+                                    if (!root.TryGetProperty("choices", out var choices) || choices.ValueKind != JsonValueKind.Array || choices.GetArrayLength() == 0)
                                     {
-                                        var idx = 0;
-                                        if (tc.TryGetProperty("index", out var idxEl) && idxEl.TryGetInt32(out var idxVal)) idx = idxVal;
-                                        if (!toolAcc.TryGetValue(idx, out var acc))
+                                        continue;
+                                    }
+                                    var choice = choices[0];
+
+                                    if (choice.TryGetProperty("finish_reason", out var frEl) && frEl.ValueKind == JsonValueKind.String)
+                                    {
+                                        var frVal = frEl.GetString();
+                                        if (!string.IsNullOrWhiteSpace(frVal)) finishReason = frVal;
+                                    }
+
+                                    if (!choice.TryGetProperty("delta", out var delta) || delta.ValueKind != JsonValueKind.Object)
+                                    {
+                                        continue;
+                                    }
+
+                                    if (delta.TryGetProperty("content", out var cEl) && cEl.ValueKind == JsonValueKind.String)
+                                    {
+                                        var txt = cEl.GetString() ?? string.Empty;
+                                        if (txt.Length > 0)
                                         {
-                                            acc = new ToolCallBuilder();
-                                            toolAcc[idx] = acc;
+                                            content.Append(txt);
+                                            yield return new AiStreamChunk { Type = "delta", Text = txt };
                                         }
-                                        if (tc.TryGetProperty("id", out var idEl) && idEl.ValueKind == JsonValueKind.String)
+                                    }
+
+                                    if (delta.TryGetProperty("tool_calls", out var tcs) && tcs.ValueKind == JsonValueKind.Array)
+                                    {
+                                        foreach (var tc in tcs.EnumerateArray())
                                         {
-                                            var idVal = idEl.GetString();
-                                            if (!string.IsNullOrWhiteSpace(idVal)) acc.Id = idVal;
-                                        }
-                                        if (tc.TryGetProperty("function", out var fn) && fn.ValueKind == JsonValueKind.Object)
-                                        {
-                                            // OpenAI 规范：function.name 仅出现在首个 fragment，且为完整名
-                                            if (string.IsNullOrEmpty(acc.Name)
-                                                && fn.TryGetProperty("name", out var nEl) && nEl.ValueKind == JsonValueKind.String)
+                                            var idx = 0;
+                                            if (tc.TryGetProperty("index", out var idxEl) && idxEl.TryGetInt32(out var idxVal)) idx = idxVal;
+                                            if (!toolAcc.TryGetValue(idx, out var acc))
                                             {
-                                                var nameVal = nEl.GetString();
-                                                if (!string.IsNullOrWhiteSpace(nameVal))
+                                                acc = new ToolCallBuilder();
+                                                toolAcc[idx] = acc;
+                                            }
+                                            if (tc.TryGetProperty("id", out var idEl) && idEl.ValueKind == JsonValueKind.String)
+                                            {
+                                                var idVal = idEl.GetString();
+                                                if (!string.IsNullOrWhiteSpace(idVal)) acc.Id = idVal;
+                                            }
+                                            if (tc.TryGetProperty("function", out var fn) && fn.ValueKind == JsonValueKind.Object)
+                                            {
+                                                // OpenAI 规范：function.name 仅出现在首个 fragment，且为完整名
+                                                if (string.IsNullOrEmpty(acc.Name)
+                                                    && fn.TryGetProperty("name", out var nEl) && nEl.ValueKind == JsonValueKind.String)
                                                 {
-                                                    acc.Name = nameVal;
-                                                    yield return new AiStreamChunk { Type = "tool", Text = nameVal };
+                                                    var nameVal = nEl.GetString();
+                                                    if (!string.IsNullOrWhiteSpace(nameVal))
+                                                    {
+                                                        acc.Name = nameVal;
+                                                        yield return new AiStreamChunk { Type = "tool", Text = nameVal };
+                                                    }
+                                                }
+                                                if (fn.TryGetProperty("arguments", out var aEl) && aEl.ValueKind == JsonValueKind.String)
+                                                {
+                                                    acc.Args.Append(aEl.GetString());
                                                 }
                                             }
-                                            if (fn.TryGetProperty("arguments", out var aEl) && aEl.ValueKind == JsonValueKind.String)
-                                            {
-                                                acc.Args.Append(aEl.GetString());
-                                            }
                                         }
                                     }
                                 }
+                            }
+                            else
+                            {
+                                content.Append(data);
+                                yield return new AiStreamChunk { Type = "delta", Text = data };
                             }
                         }
                         else
                         {
-                            content.Append(data);
-                            yield return new AiStreamChunk { Type = "delta", Text = data };
+                            lineBytes.WriteByte(buffer[i]);
                         }
                     }
-                    else
-                    {
-                        lineBytes.WriteByte(buffer[i]);
-                    }
                 }
-            }
 
-            if (!done && string.IsNullOrWhiteSpace(finishReason))
-            {
-                outcome = Failed("failed", "stream_interrupted", "AI 流式连接未正常结束",
-                    (int)response.StatusCode, providerRequestId);
-                outcome.PromptTokens = promptTokens;
-                outcome.CompletionTokens = completionTokens;
-                outcome.TotalTokens = totalTokens > 0 ? totalTokens : promptTokens + completionTokens;
-                outcome.HasUsage = promptTokens > 0 || completionTokens > 0 || totalTokens > 0;
-                throw new HttpRequestException("AI 流式响应中断，请重试");
-            }
+                if (!done && string.IsNullOrWhiteSpace(finishReason))
+                {
+                    outcome = Failed("failed", "stream_interrupted", "AI 流式连接未正常结束",
+                        (int)response.StatusCode, providerRequestId);
+                    outcome.PromptTokens = promptTokens;
+                    outcome.CompletionTokens = completionTokens;
+                    outcome.TotalTokens = totalTokens > 0 ? totalTokens : promptTokens + completionTokens;
+                    outcome.HasUsage = promptTokens > 0 || completionTokens > 0 || totalTokens > 0;
+                    throw new HttpRequestException("AI 流式响应中断，请重试");
+                }
 
-            var toolCalls = toolAcc.Values
-                .Where(b => !string.IsNullOrWhiteSpace(b.Name) || b.Args.Length > 0)
-                .Select(b => new ToolCall { Id = b.Id, Name = b.Name, Arguments = b.Args.ToString() })
-                .ToList();
+                var toolCalls = toolAcc.Values
+                    .Where(b => !string.IsNullOrWhiteSpace(b.Name) || b.Args.Length > 0)
+                    .Select(b => new ToolCall { Id = b.Id, Name = b.Name, Arguments = b.Args.ToString() })
+                    .ToList();
 
-            Logger.LogInformation("AI token usage [provider={Provider}, model={Model}, scene={Scene}] 输入(prompt)={PromptTokens} 输出(completion)={CompletionTokens} 合计(total)={TotalTokens}",
-                resolved.Provider, resolved.Model, scene, promptTokens, completionTokens, totalTokens);
+                Logger.LogInformation("AI token usage [provider={Provider}, model={Model}, scene={Scene}] 输入(prompt)={PromptTokens} 输出(completion)={CompletionTokens} 合计(total)={TotalTokens}",
+                    resolved.Provider, resolved.Model, scene, promptTokens, completionTokens, totalTokens);
 
-            var result = new ChatToolResult
-            {
-                Content = content.ToString(),
-                ToolCalls = toolCalls,
-                FinishReason = finishReason,
-                PromptTokens = promptTokens,
-                CompletionTokens = completionTokens,
-                TotalTokens = totalTokens
-            };
+                var result = new ChatToolResult
+                {
+                    Content = content.ToString(),
+                    ToolCalls = toolCalls,
+                    FinishReason = finishReason,
+                    PromptTokens = promptTokens,
+                    CompletionTokens = completionTokens,
+                    TotalTokens = totalTokens
+                };
 
-            if (string.IsNullOrWhiteSpace(result.Content) && (result.ToolCalls == null || result.ToolCalls.Count == 0))
-            {
-                outcome = Failed("parse", "unusable_response", "AI 服务响应无可用内容",
-                    (int)response.StatusCode, providerRequestId);
-                Logger.LogError("AI 流式响应无可用内容（无 content 且无 tool_calls）。uri={Uri}, model={Model}", uri, resolved.Model);
-                throw new HttpRequestException("AI 服务返回了无法解析的响应，请稍后重试或联系管理员");
-            }
-            outcome = Succeeded((promptTokens, completionTokens, totalTokens),
-                (int)response.StatusCode, providerRequestId,
-                promptTokens > 0 || completionTokens > 0 || totalTokens > 0);
-            yield return new AiStreamChunk { Type = "finish", Result = result };
+                if (string.IsNullOrWhiteSpace(result.Content) && (result.ToolCalls == null || result.ToolCalls.Count == 0))
+                {
+                    outcome = Failed("parse", "unusable_response", "AI 服务响应无可用内容",
+                        (int)response.StatusCode, providerRequestId);
+                    Logger.LogError("AI 流式响应无可用内容（无 content 且无 tool_calls）。uri={Uri}, model={Model}", uri, resolved.Model);
+                    throw new HttpRequestException("AI 服务返回了无法解析的响应，请稍后重试或联系管理员");
+                }
+                outcome = Succeeded((promptTokens, completionTokens, totalTokens),
+                    (int)response.StatusCode, providerRequestId,
+                    promptTokens > 0 || completionTokens > 0 || totalTokens > 0);
+                yield return new AiStreamChunk { Type = "finish", Result = result };
             }
             finally
             {
@@ -719,6 +723,16 @@ namespace Infrastructure.AI
             public readonly StringBuilder Args = new StringBuilder();
         }
 
+        /// <summary>
+        /// 开始治理调用：若 governance 为 null 则返回 null。
+        /// </summary>
+        /// <param name="scene"></param>
+        /// <param name="provider"></param>
+        /// <param name="model"></param>
+        /// <param name="payload"></param>
+        /// <param name="maxTokens"></param>
+        /// <param name="isStream"></param>
+        /// <returns></returns>
         private static async Task<AiCallLease> BeginGovernedCallAsync(
             string scene, string provider, string model, string payload, int maxTokens, bool isStream)
         {
@@ -735,6 +749,12 @@ namespace Infrastructure.AI
             });
         }
 
+        /// <summary>
+        /// 结算治理调用：无论成功/失败/异常，均尝试调用 CompleteAsync 结算；若 governance 为 null 则忽略。
+        /// </summary>
+        /// <param name="lease"></param>
+        /// <param name="outcome"></param>
+        /// <returns></returns>
         private static async Task CompleteGovernedCallAsync(AiCallLease lease, AiCallOutcome outcome)
         {
             if (lease == null) return;
@@ -752,6 +772,14 @@ namespace Infrastructure.AI
             }
         }
 
+        /// <summary>
+        /// 构建成功的 AiCallOutcome，供 CompleteGovernedCallAsync 结算使用。
+        /// </summary>
+        /// <param name="usage"></param>
+        /// <param name="statusCode"></param>
+        /// <param name="requestId"></param>
+        /// <param name="hasUsage"></param>
+        /// <returns></returns>
         private static AiCallOutcome Succeeded(
             (int Prompt, int Completion, int Total) usage, int? statusCode, string requestId, bool? hasUsage = null) =>
             new()
@@ -766,6 +794,15 @@ namespace Infrastructure.AI
                 HasUsage = hasUsage ?? (usage.Prompt > 0 || usage.Completion > 0 || usage.Total > 0)
             };
 
+        /// <summary>
+        /// 构建失败的 AiCallOutcome，供 CompleteGovernedCallAsync 结算使用。
+        /// </summary>
+        /// <param name="status"></param>
+        /// <param name="errorType"></param>
+        /// <param name="message"></param>
+        /// <param name="statusCode"></param>
+        /// <param name="requestId"></param>
+        /// <returns></returns>
         private static AiCallOutcome Failed(
             string status, string errorType, string message, int? statusCode = null, string requestId = null) =>
             new()
@@ -853,6 +890,11 @@ namespace Infrastructure.AI
             return result;
         }
 
+        /// <summary>
+        /// 从 OpenAI 兼容响应解析 message.content 文本（message.content 为字符串时返回，否则空）。
+        /// </summary>
+        /// <param name="root"></param>
+        /// <returns></returns>
         public static string ReadContent(JsonElement root)
         {
             if (!root.TryGetProperty("choices", out var choices) || choices.ValueKind != JsonValueKind.Array || choices.GetArrayLength() == 0)
@@ -883,6 +925,12 @@ namespace Infrastructure.AI
             return string.Empty;
         }
 
+        /// <summary>
+        /// 从 OpenAI 兼容响应解析 usage 节点，返回 prompt/completion/total token 数。
+        /// </summary>
+        /// <param name="statusCode"></param>
+        /// <param name="responseText"></param>
+        /// <returns></returns>
         public static string BuildAiErrorMessage(int statusCode, string responseText)
         {
             var detail = TryReadProviderErrorMessage(responseText);
@@ -933,6 +981,8 @@ namespace Infrastructure.AI
         /// 响应若携带 provider 错误（如 OpenAI/千问 error 节点：配额耗尽、鉴权失败等），
         /// 提取 error.message 抛 HttpRequestException，避免被当作空内容静默吞掉难以排查。
         /// 无 error 节点时不做处理。
+        /// <paramref name="responseText"/> 原始响应文本，用于日志记录与解析 error.message。
+        /// <paramref name="root"/> JsonDocument 根节点，已解析的响应 JSON。
         /// </summary>
         private static void EnsureNoProviderError(string responseText, JsonElement root)
         {
@@ -949,6 +999,9 @@ namespace Infrastructure.AI
         /// <summary>
         /// 按 provider 判断是否支持 enable_thinking（混合思考模型：Qwen3 系列等），
         /// 支持则在请求体显式写入该参数，避免默认开启思考导致首字延迟高。其余 provider 不加。
+        /// <paramref name="enableThinking"/>是否启用混合思考模型（Qwen3 系列等），默认 false。
+        /// <paramref name="payload"/> 请求体字典，按 provider 可能写入 enable_thinking。
+        /// <paramref name="provider"/> provider 名称，按名称判断是否支持 enable_thinking。
         /// </summary>
         private static void ApplyThinkingOptions(Dictionary<string, object> payload, string provider, bool enableThinking)
         {

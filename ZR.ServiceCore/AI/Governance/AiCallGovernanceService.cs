@@ -31,6 +31,11 @@ namespace ZR.ServiceCore.AI.Governance
             _options = options.Value?.AiOptions ?? new AiOptions();
         }
 
+        /// <summary>
+        /// 开始一次 AI 调用治理流程，返回租约对象，调用方应在调用完成后调用 CompleteAsync 结算。
+        /// </summary>
+        /// <param name="request"></param>
+        /// <returns></returns>
         public async Task<AiCallLease> BeginAsync(AiCallRequest request)
         {
             request ??= new AiCallRequest();
@@ -48,11 +53,11 @@ namespace ZR.ServiceCore.AI.Governance
             AiModelPrice price = null;
             try
             {
-                price = Context.Queryable<AiModelPrice>()
+                price = await Context.Queryable<AiModelPrice>()
                     .Where(x => x.Status == 0
                         && x.Provider.ToLower() == Normalize(request.Provider, "unknown").ToLowerInvariant()
                         && x.Model.ToLower() == Normalize(request.Model, "unknown").ToLowerInvariant())
-                    .First();
+                    .FirstAsync();
             }
             catch (Exception ex)
             {
@@ -107,84 +112,84 @@ namespace ZR.ServiceCore.AI.Governance
             await QuotaGate.WaitAsync();
             try
             {
-            var now = DateTime.Now;
-            if (scene == "ai_chat" && userId > 0 && _options.ChatRateLimitPerMinute > 0)
-            {
-                var minuteBegin = now.AddMinutes(-1);
-                var recent = 0;
-                try
+                var now = DateTime.Now;
+                if (scene == "ai_chat" && userId > 0 && _options.ChatRateLimitPerMinute > 0)
                 {
-                    recent = Context.Queryable<AiCallLog>()
-                        .Where(x => x.TenantId == tenantId && x.UserId == userId
-                            && x.Scene == "ai_chat" && x.CreateTime >= minuteBegin
-                            && x.Status != "rejected")
-                        .Count();
-                }
-                catch (Exception ex)
-                {
-                    AccountingHealthy = false;
-                    Logger.Warn(ex, "读取 AI 分钟额度失败，已关闭普通 AI 调用");
-                    await RejectAsync(lease, "governance_unavailable", "AI 额度计量暂不可用，请稍后重试");
-                }
-                var activeCalls = GetActiveCount($"user:{tenantId}:{userId}|ai_chat");
-                if (recent + activeCalls >= _options.ChatRateLimitPerMinute)
-                {
-                    await RejectAsync(lease, "minute_calls", $"发送过于频繁，请稍后再试（每分钟最多 {_options.ChatRateLimitPerMinute} 次模型调用）");
-                }
-            }
-
-            var dayBegin = now.Date;
-            var monthBegin = new DateTime(now.Year, now.Month, 1);
-            foreach (var limit in globalLimits)
-                await CheckQuotaAsync(lease, limit, "global", dayBegin, monthBegin);
-            foreach (var limit in tenantLimits)
-                await CheckQuotaAsync(lease, limit, $"tenant:{tenantId}", dayBegin, monthBegin);
-            foreach (var limit in subjectLimits)
-                await CheckQuotaAsync(lease, limit, $"user:{tenantId}:{userId}", dayBegin, monthBegin);
-
-            var concurrencyKeys = new List<(string Key, int Limit)>();
-            foreach (var limit in globalLimits)
-                AddConcurrency(concurrencyKeys, $"global|{limit.SceneFilter}", limit.ConcurrentLimit);
-            foreach (var limit in tenantLimits)
-                AddConcurrency(concurrencyKeys, $"tenant:{tenantId}|{limit.SceneFilter}", limit.ConcurrentLimit);
-            foreach (var limit in subjectLimits)
-                AddConcurrency(concurrencyKeys, $"user:{tenantId}:{userId}|{limit.SceneFilter}", limit.ConcurrentLimit);
-            concurrencyKeys = concurrencyKeys
-                .GroupBy(x => x.Key, StringComparer.OrdinalIgnoreCase)
-                .Select(x => (x.Key, x.Min(y => y.Limit)))
-                .ToList();
-
-            var concurrencyDenied = false;
-            lock (ReservationLock)
-            {
-                foreach (var item in concurrencyKeys)
-                {
-                    ConcurrentCounts.TryGetValue(item.Key, out var current);
-                    if (current >= item.Limit)
+                    var minuteBegin = now.AddMinutes(-1);
+                    var recent = 0;
+                    try
                     {
-                        concurrencyDenied = true;
-                        break;
+                        recent = await Context.Queryable<AiCallLog>()
+                            .Where(x => x.TenantId == tenantId && x.UserId == userId
+                                && x.Scene == "ai_chat" && x.CreateTime >= minuteBegin
+                                && x.Status != "rejected")
+                            .CountAsync();
+                    }
+                    catch (Exception ex)
+                    {
+                        AccountingHealthy = false;
+                        Logger.Warn(ex, "读取 AI 分钟额度失败，已关闭普通 AI 调用");
+                        await RejectAsync(lease, "governance_unavailable", "AI 额度计量暂不可用，请稍后重试");
+                    }
+                    var activeCalls = GetActiveCount($"user:{tenantId}:{userId}|ai_chat");
+                    if (recent + activeCalls >= _options.ChatRateLimitPerMinute)
+                    {
+                        await RejectAsync(lease, "minute_calls", $"发送过于频繁，请稍后再试（每分钟最多 {_options.ChatRateLimitPerMinute} 次模型调用）");
                     }
                 }
 
-                if (!concurrencyDenied)
+                var dayBegin = now.Date;
+                var monthBegin = new DateTime(now.Year, now.Month, 1);
+                foreach (var limit in globalLimits)
+                    await CheckQuotaAsync(lease, limit, "global", dayBegin, monthBegin);
+                foreach (var limit in tenantLimits)
+                    await CheckQuotaAsync(lease, limit, $"tenant:{tenantId}", dayBegin, monthBegin);
+                foreach (var limit in subjectLimits)
+                    await CheckQuotaAsync(lease, limit, $"user:{tenantId}:{userId}", dayBegin, monthBegin);
+
+                var concurrencyKeys = new List<(string Key, int Limit)>();
+                foreach (var limit in globalLimits)
+                    AddConcurrency(concurrencyKeys, $"global|{limit.SceneFilter}", limit.ConcurrentLimit);
+                foreach (var limit in tenantLimits)
+                    AddConcurrency(concurrencyKeys, $"tenant:{tenantId}|{limit.SceneFilter}", limit.ConcurrentLimit);
+                foreach (var limit in subjectLimits)
+                    AddConcurrency(concurrencyKeys, $"user:{tenantId}:{userId}|{limit.SceneFilter}", limit.ConcurrentLimit);
+                concurrencyKeys = concurrencyKeys
+                    .GroupBy(x => x.Key, StringComparer.OrdinalIgnoreCase)
+                    .Select(x => (x.Key, x.Min(y => y.Limit)))
+                    .ToList();
+
+                var concurrencyDenied = false;
+                lock (ReservationLock)
                 {
                     foreach (var item in concurrencyKeys)
                     {
-                        ConcurrentCounts[item.Key] = ConcurrentCounts.GetValueOrDefault(item.Key) + 1;
+                        ConcurrentCounts.TryGetValue(item.Key, out var current);
+                        if (current >= item.Limit)
+                        {
+                            concurrencyDenied = true;
+                            break;
+                        }
                     }
-                    lease.ConcurrencyKeys = concurrencyKeys.Select(x => x.Key).ToArray();
-                    ActiveReservations[lease.RequestId] = new ActiveReservation
+
+                    if (!concurrencyDenied)
                     {
-                        ScopeKeys = BuildQuotaScopeKeys(tenantId, userId, scene),
-                        Tokens = reservedTokens,
-                        Amount = reservedAmount
-                    };
+                        foreach (var item in concurrencyKeys)
+                        {
+                            ConcurrentCounts[item.Key] = ConcurrentCounts.GetValueOrDefault(item.Key) + 1;
+                        }
+                        lease.ConcurrencyKeys = concurrencyKeys.Select(x => x.Key).ToArray();
+                        ActiveReservations[lease.RequestId] = new ActiveReservation
+                        {
+                            ScopeKeys = BuildQuotaScopeKeys(tenantId, userId, scene),
+                            Tokens = reservedTokens,
+                            Amount = reservedAmount
+                        };
+                    }
                 }
-            }
-            if (concurrencyDenied)
-                await RejectAsync(lease, "concurrency", "AI 并发请求数已达上限，请稍后重试");
-            return lease;
+                if (concurrencyDenied)
+                    await RejectAsync(lease, "concurrency", "AI 并发请求数已达上限，请稍后重试");
+                return lease;
             }
             finally
             {
@@ -192,6 +197,12 @@ namespace ZR.ServiceCore.AI.Governance
             }
         }
 
+        /// <summary>
+        /// 完成一次 AI 调用治理流程，记录调用结果和计量信息。
+        /// </summary>
+        /// <param name="lease"></param>
+        /// <param name="outcome"></param>
+        /// <returns></returns>
         public async Task CompleteAsync(AiCallLease lease, AiCallOutcome outcome)
         {
             if (lease == null) return;
@@ -220,7 +231,7 @@ namespace ZR.ServiceCore.AI.Governance
             if (outcome.HasUsage) estimatedAmount = inputAmount + outputAmount;
             try
             {
-                if (Context.Queryable<AiCallLog>().Any(x => x.RequestId == lease.RequestId))
+                if (await Context.Queryable<AiCallLog>().AnyAsync(x => x.RequestId == lease.RequestId))
                 {
                     AccountingHealthy = true;
                     return;
