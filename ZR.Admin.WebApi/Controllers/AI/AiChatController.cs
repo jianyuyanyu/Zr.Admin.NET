@@ -43,6 +43,19 @@ namespace ZR.Admin.WebApi.Controllers.AI
         }
 
         /// <summary>
+        /// 当前用户可见的工具展示名清单（Name + Label）。
+        /// 前端据此渲染"正在调用 XX / 已调用 XX"，后端新增工具无需再改前端映射；
+        /// 声明了权限的工具仅对有权限用户返回，未登记 Label 时前端降级显示工具名。
+        /// </summary>
+        [HttpGet("tools")]
+        [ActionPermissionFilter(Permission = "common")]
+        public async Task<IActionResult> Tools()
+        {
+            var userId = HttpContext.GetUId();
+            return SUCCESS(await _aiChatService.GetMyToolCatalogAsync(userId));
+        }
+
+        /// <summary>
         /// 会话列表（按当前用户，最近更新倒序，最多 50 条）
         /// </summary>
         [HttpGet("sessions")]

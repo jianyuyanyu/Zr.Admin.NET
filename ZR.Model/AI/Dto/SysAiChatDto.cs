@@ -90,14 +90,38 @@ namespace ZR.Model.AI.Dto
     }
 
     /// <summary>
-    /// 供模型 function calling 识别的工具定义
+    /// 供模型 function calling 识别的工具定义。
+    /// Name/Description/Parameters 参与模型请求；Label/Permission 仅用于前端展示与清单过滤，不下发给模型。
     /// </summary>
     public class AiToolDef
     {
         public string Name { get; set; }
         public string Description { get; set; }
+
+        /// <summary>工具中文展示名（前端"正在调用 XX"）。留空时前端降级显示 Name。</summary>
+        public string Label { get; set; }
+
+        /// <summary>
+        /// 可选权限码。非空时该工具仅对拥有此权限（或管理员）的用户出现在工具清单中，
+        /// 避免把受限能力名暴露给无权限用户。留空表示不做清单过滤（工具内部仍按 userId 隔离数据）。
+        /// </summary>
+        public string Permission { get; set; }
+
         /// <summary>JSON Schema（object），例如 { type="object", properties=..., required=... }</summary>
         public object Parameters { get; set; }
+    }
+
+    /// <summary>
+    /// 下发给前端的工具展示名清单项（GET aichat/tools）。
+    /// 只含展示所需字段，不含 Description，避免把工具能力细节透给前端。
+    /// </summary>
+    public class AiToolCatalogItemDto
+    {
+        /// <summary>工具名，与 SSE tool 事件的 ToolName 对应</summary>
+        public string Name { get; set; }
+
+        /// <summary>中文展示名；后端未登记时为 null，前端应降级显示 Name</summary>
+        public string Label { get; set; }
     }
 
     /// <summary>

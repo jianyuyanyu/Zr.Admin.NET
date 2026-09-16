@@ -1,3 +1,4 @@
+using Infrastructure;
 using Infrastructure.AI;
 using Infrastructure.Attribute;
 using Infrastructure.Model;
@@ -26,6 +27,7 @@ namespace ZR.ServiceCore.AI
         private readonly ISysAiService _sysAi;
         private readonly IDailyScheduleService _scheduleService;
         private readonly IAiChatLlmGateway _llm;
+        private readonly ISysPermissionService _permissionService;
         private readonly IReadOnlyList<IAiAssistantToolProvider> _toolProviders;
         private readonly IReadOnlyList<AiToolDef> _providerToolDefs;
         private readonly Dictionary<string, IAiAssistantToolProvider> _toolProviderMap;
@@ -45,12 +47,15 @@ namespace ZR.ServiceCore.AI
         /// <param name="scheduleService">日程服务（日程查询工具）</param>
         /// <param name="llm">大模型调用网关（封装静态 AiLlmClient，便于测试替换）</param>
         /// <param name="toolProviders">各模块注册的扩展工具提供者</param>
+        /// <param name="permissionService">权限服务（工具清单按用户权限过滤）</param>
         public SysAiChatService(ISysAiService sysAi, IDailyScheduleService scheduleService,
-            IAiChatLlmGateway llm, IEnumerable<IAiAssistantToolProvider> toolProviders)
+            IAiChatLlmGateway llm, IEnumerable<IAiAssistantToolProvider> toolProviders,
+            ISysPermissionService permissionService)
         {
             _sysAi = sysAi;
             _scheduleService = scheduleService;
             _llm = llm;
+            _permissionService = permissionService;
             _toolProviders = (toolProviders ?? []).ToList();
 
             var defs = new List<AiToolDef>();
@@ -420,65 +425,119 @@ namespace ZR.ServiceCore.AI
 
         #region 工具定义与执行
 
+        /// <summary>
+        /// 全部工具定义：内置办工工具 + 各模块 Provider 注册的扩展工具。
+        /// 模型 function calling 与前端工具清单（GET aichat/tools）共用此集合，避免两处各维护一份导致漂移。
+        /// </summary>
+        private List<AiToolDef> BuildToolDefs()
+        {
+            var defs = new List<AiToolDef>
+            {
+                new AiToolDef
+                {
+                    Name = "query_my_schedules",
+                    Label = "日程查询",
+                    Description = "查询当前登录用户指定日期范围内的日程安排（按截止/完成/创建时间任一命中，含已完成）。不传参数默认查最近 7 天。用于“我今天有什么安排/本周日程/某天日程”。",
+                    Parameters = new
+                    {
+                        type = "object",
+                        properties = new Dictionary<string, object>
+                        {
+                            ["startDate"] = new { type = "string", description = "开始日期，格式 yyyy-MM-dd，可省略" },
+                            ["endDate"] = new { type = "string", description = "结束日期（含当天），格式 yyyy-MM-dd，可省略" }
+                        },
+                        required = Array.Empty<string>()
+                    }
+                },
+                new AiToolDef
+                {
+                    Name = "parse_schedule",
+                    Label = "日程解析",
+                    Description = "把用户口语化的日程描述解析成结构化日程草稿（标题/内容/优先级/截止/提醒）。只生成草稿不落库。用于“帮我记一个日程：...”等表达。",
+                    Parameters = new
+                    {
+                        type = "object",
+                        properties = new Dictionary<string, object>
+                        {
+                            ["text"] = new { type = "string", description = "用户原始口语描述" }
+                        },
+                        required = new[] { "text" }
+                    }
+                },
+                new AiToolDef
+                {
+                    Name = "generate_weekly_report",
+                    Label = "周报生成",
+                    Description = "汇总当前用户本周日程自动生成工作周报草稿（Markdown）。用于“帮我写周报/本周总结”。",
+                    Parameters = new
+                    {
+                        type = "object",
+                        properties = new Dictionary<string, object>(),
+                        required = Array.Empty<string>()
+                    }
+                }
+            };
+            defs.AddRange(_providerToolDefs);
+            return defs;
+        }
+
+        /// <summary>
+        /// 组装发给模型的 function calling 工具数组。
+        /// 只取 Name/Description/Parameters——Label/Permission 属前端展示与清单过滤字段，不参与模型请求。
+        /// </summary>
         private object[] BuildToolObjects()
         {
-            var tools = new List<object>();
-
-            void Add(AiToolDef def)
-            {
-                tools.Add(new
+            return BuildToolDefs()
+                .Select(def => (object)new
                 {
                     type = "function",
                     function = new { name = def.Name, description = def.Description, parameters = def.Parameters }
-                });
-            }
+                })
+                .ToArray();
+        }
 
-            Add(new AiToolDef
+        /// <summary>
+        /// 当前用户可见的工具展示名清单（GET aichat/tools）。
+        /// 只返回 Name/Label 两个展示字段，不含 Description，避免把工具能力细节透给前端；
+        /// 声明了 Permission 的工具仅对有权限用户返回，防止受限能力名被无权用户看到。
+        /// </summary>
+        public Task<List<AiToolCatalogItemDto>> GetMyToolCatalogAsync(long userId)
+        {
+            var defs = BuildToolDefs();
+            var items = new List<AiToolCatalogItemDto>(defs.Count);
+            // 按需加载：只有存在受限工具时才查权限，普通用户不产生额外开销
+            List<string> perms = null;
+            foreach (var def in defs)
             {
-                Name = "query_my_schedules",
-                Description = "查询当前登录用户指定日期范围内的日程安排（按截止/完成/创建时间任一命中，含已完成）。不传参数默认查最近 7 天。用于“我今天有什么安排/本周日程/某天日程”。",
-                Parameters = new
+                if (def == null || string.IsNullOrWhiteSpace(def.Name)) continue;
+                if (!string.IsNullOrWhiteSpace(def.Permission))
                 {
-                    type = "object",
-                    properties = new Dictionary<string, object>
+                    perms ??= LoadPerms(userId);
+                    if (perms == null || !(perms.Contains(GlobalConstant.AdminPerm) || perms.Contains(def.Permission)))
                     {
-                        ["startDate"] = new { type = "string", description = "开始日期，格式 yyyy-MM-dd，可省略" },
-                        ["endDate"] = new { type = "string", description = "结束日期（含当天），格式 yyyy-MM-dd，可省略" }
-                    },
-                    required = Array.Empty<string>()
+                        continue;
+                    }
                 }
-            });
-            Add(new AiToolDef
-            {
-                Name = "parse_schedule",
-                Description = "把用户口语化的日程描述解析成结构化日程草稿（标题/内容/优先级/截止/提醒）。只生成草稿不落库。用于“帮我记一个日程：...”等表达。",
-                Parameters = new
-                {
-                    type = "object",
-                    properties = new Dictionary<string, object>
-                    {
-                        ["text"] = new { type = "string", description = "用户原始口语描述" }
-                    },
-                    required = new[] { "text" }
-                }
-            });
-            Add(new AiToolDef
-            {
-                Name = "generate_weekly_report",
-                Description = "汇总当前用户本周日程自动生成工作周报草稿（Markdown）。用于“帮我写周报/本周总结”。",
-                Parameters = new
-                {
-                    type = "object",
-                    properties = new Dictionary<string, object>(),
-                    required = Array.Empty<string>()
-                }
-            });
-
-            foreach (var def in _providerToolDefs)
-            {
-                Add(def);
+                items.Add(new AiToolCatalogItemDto { Name = def.Name, Label = def.Label });
             }
-            return tools.ToArray();
+            return Task.FromResult(items);
+        }
+
+        /// <summary>
+        /// 读取用户权限码集合；失败返回 null（调用方按无权限保守处理，不把受限工具透出）。
+        /// 与图表/日志工具内部的权限口径一致（GetMenuPermission + 管理员隐含放行）。
+        /// </summary>
+        private List<string> LoadPerms(long userId)
+        {
+            try
+            {
+                return _permissionService.GetMenuPermission(new SysUserDto { UserId = userId });
+            }
+            catch (Exception ex)
+            {
+                _logger.Error(ex, "AI 工具清单计算用户权限失败 userId={UserId}", userId);
+                return null;
+            }
         }
 
         /// <summary>

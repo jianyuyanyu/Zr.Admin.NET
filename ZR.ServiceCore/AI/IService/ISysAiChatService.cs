@@ -26,6 +26,12 @@ namespace ZR.ServiceCore.AI.IService
         Task<SysAiChatDetailDto> GetMessagesAsync(long sessionId, long userId);
 
         /// <summary>
+        /// 当前用户可见的工具展示名清单（供前端渲染"正在调用 XX"，避免前端硬编码工具中文名）。
+        /// 声明了 Permission 的工具仅对有权限用户返回；Label 未登记时前端应降级显示 Name。
+        /// </summary>
+        Task<List<AiToolCatalogItemDto>> GetMyToolCatalogAsync(long userId);
+
+        /// <summary>
         /// 发送一条消息并获取回复。内部可能多次调用 LLM + 执行工具。
         /// SessionId&lt;=0 时自动新建；首轮会依据提问内容自动生成标题。
         /// </summary>

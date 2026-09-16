@@ -34,6 +34,7 @@ namespace ZR.Workflow.Service
                 new AiToolDef
                 {
                     Name = "query_my_todos",
+                    Label = "待办查询",
                     Description = "查询当前登录用户待我审批的待办任务列表。适用于“我有多少待办”“待我审批的”“我的待办”等提问。",
                     Parameters = new
                     {

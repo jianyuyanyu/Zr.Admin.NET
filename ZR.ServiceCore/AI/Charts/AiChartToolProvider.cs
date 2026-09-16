@@ -85,6 +85,9 @@ namespace ZR.ServiceCore.AI.Charts
                 new AiToolDef
                 {
                     Name = "query_chart_dataset",
+                    Label = "图表数据查询",
+                    // 不设 Permission：工具本身对所有登录用户可见，具体数据集权限在 ExecuteAsync 内按 dataset 校验，
+                    // 无权限时返回空清单，工具名不携带敏感语义。
                     Description = "查询后台预注册的聚合图表数据（折线/柱状/饼图）。禁止用于任意表查询或写 SQL。"
                         + "不传 datasetId 时返回当前用户有权的数据集清单。"
                         + "已注册：" + catalog
