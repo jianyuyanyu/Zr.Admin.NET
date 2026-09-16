@@ -31,6 +31,13 @@ namespace Infrastructure.Cache
         void Set<T>(string key, T value, int expireMinutes);
         bool Exists(string key);
         void Remove(string key);
+
+        /// <summary>
+        /// 原子自增并返回自增后的值（键不存在时按 0 起算），首次自增时设置过期时间。
+        /// Redis 后端为跨节点原子操作；内存后端以进程内锁保证串行（单实例语义）。
+        /// 供限流计数等需要跨实例原子性的场景使用。
+        /// </summary>
+        long Increment(string key, int expireMinutes);
     }
 
     /// <summary>
@@ -39,10 +46,24 @@ namespace Infrastructure.Cache
     /// </summary>
     public class MemoryCacheStore : ICache
     {
+        // 内存后端无原生原子自增，以进程内锁保证「读-改-写」串行（单实例语义）
+        private static readonly object IncrementLock = new();
+
         public T Get<T>(string key) => (T)CacheHelper.GetCache(key);
         public void Set<T>(string key, T value, int expireMinutes) => CacheHelper.SetCache(key, value, expireMinutes);
         public bool Exists(string key) => CacheHelper.Exists(key);
         public void Remove(string key) => CacheHelper.Remove(key);
+
+        public long Increment(string key, int expireMinutes)
+        {
+            lock (IncrementLock)
+            {
+                var current = CacheHelper.GetCache(key);
+                var next = (current is long value ? value : 0L) + 1;
+                CacheHelper.SetCache(key, next, expireMinutes);
+                return next;
+            }
+        }
     }
 
     /// <summary>
@@ -58,6 +79,17 @@ namespace Infrastructure.Cache
             => _redis.Set(key, value, (int)TimeSpan.FromMinutes(expireMinutes).TotalSeconds);
         public bool Exists(string key) => _redis.Exists(key);
         public void Remove(string key) => _redis.Del(key);
+
+        public long Increment(string key, int expireMinutes)
+        {
+            var value = _redis.IncrBy(key, 1);
+            if (value == 1)
+            {
+                // 仅在首次自增时设过期，避免每次续期导致键永不过期
+                _redis.Expire(key, (int)TimeSpan.FromMinutes(expireMinutes).TotalSeconds);
+            }
+            return value;
+        }
     }
 
     /// <summary>

@@ -30,16 +30,9 @@ namespace ZR.Admin.WebApi.Controllers.AI
         /// </summary>
         [HttpGet("quota")]
         [ActionPermissionFilter(Permission = "common")]
-        public IActionResult Quota([FromQuery] string scene = "ai_chat")
+        public async Task<IActionResult> Quota([FromQuery] string scene = "ai_chat")
         {
-            try
-            {
-                return SUCCESS(_callGovernance.GetMyQuota(scene));
-            }
-            catch (Exception ex)
-            {
-                return ToResponse(ResultCode.FAIL, ex.Message);
-            }
+            return SUCCESS(await _callGovernance.GetMyQuotaAsync(scene));
         }
 
         /// <summary>
@@ -62,15 +55,8 @@ namespace ZR.Admin.WebApi.Controllers.AI
         [ActionPermissionFilter(Permission = "common")]
         public async Task<IActionResult> Sessions()
         {
-            try
-            {
-                var userId = HttpContext.GetUId();
-                return SUCCESS(await _aiChatService.ListSessionsAsync(userId));
-            }
-            catch (Exception ex)
-            {
-                return ToResponse(ResultCode.FAIL, ex.Message);
-            }
+            var userId = HttpContext.GetUId();
+            return SUCCESS(await _aiChatService.ListSessionsAsync(userId));
         }
 
         /// <summary>
@@ -80,15 +66,8 @@ namespace ZR.Admin.WebApi.Controllers.AI
         [ActionPermissionFilter(Permission = "common")]
         public async Task<IActionResult> CreateSession()
         {
-            try
-            {
-                var userId = HttpContext.GetUId();
-                return SUCCESS(await _aiChatService.CreateSessionAsync(userId));
-            }
-            catch (Exception ex)
-            {
-                return ToResponse(ResultCode.FAIL, ex.Message);
-            }
+            var userId = HttpContext.GetUId();
+            return SUCCESS(await _aiChatService.CreateSessionAsync(userId));
         }
 
         /// <summary>
@@ -102,15 +81,8 @@ namespace ZR.Admin.WebApi.Controllers.AI
             {
                 return ToResponse(ResultCode.FAIL, "标题不能为空");
             }
-            try
-            {
-                var userId = HttpContext.GetUId();
-                return SUCCESS(await _aiChatService.RenameSessionAsync(sessionId, userId, parm.Title.Trim()));
-            }
-            catch (Exception ex)
-            {
-                return ToResponse(ResultCode.FAIL, ex.Message);
-            }
+            var userId = HttpContext.GetUId();
+            return SUCCESS(await _aiChatService.RenameSessionAsync(sessionId, userId, parm.Title.Trim()));
         }
 
         /// <summary>
@@ -120,15 +92,8 @@ namespace ZR.Admin.WebApi.Controllers.AI
         [ActionPermissionFilter(Permission = "common")]
         public async Task<IActionResult> DeleteSession(long sessionId)
         {
-            try
-            {
-                var userId = HttpContext.GetUId();
-                return SUCCESS(await _aiChatService.DeleteSessionAsync(sessionId, userId));
-            }
-            catch (Exception ex)
-            {
-                return ToResponse(ResultCode.FAIL, ex.Message);
-            }
+            var userId = HttpContext.GetUId();
+            return SUCCESS(await _aiChatService.DeleteSessionAsync(sessionId, userId));
         }
 
         /// <summary>
@@ -138,15 +103,8 @@ namespace ZR.Admin.WebApi.Controllers.AI
         [ActionPermissionFilter(Permission = "common")]
         public async Task<IActionResult> Messages(long sessionId)
         {
-            try
-            {
-                var userId = HttpContext.GetUId();
-                return SUCCESS(await _aiChatService.GetMessagesAsync(sessionId, userId));
-            }
-            catch (Exception ex)
-            {
-                return ToResponse(ResultCode.FAIL, ex.Message);
-            }
+            var userId = HttpContext.GetUId();
+            return SUCCESS(await _aiChatService.GetMessagesAsync(sessionId, userId));
         }
 
         /// <summary>
@@ -160,15 +118,8 @@ namespace ZR.Admin.WebApi.Controllers.AI
             {
                 return ToResponse(ResultCode.FAIL, "消息内容不能为空");
             }
-            try
-            {
-                var userId = HttpContext.GetUId();
-                return SUCCESS(await _aiChatService.ChatAsync(parm.SessionId, userId, parm.Message));
-            }
-            catch (Exception ex)
-            {
-                return ToResponse(ResultCode.FAIL, ex.Message);
-            }
+            var userId = HttpContext.GetUId();
+            return SUCCESS(await _aiChatService.ChatAsync(parm.SessionId, userId, parm.Message));
         }
 
         /// <summary>

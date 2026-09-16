@@ -1,8 +1,8 @@
 using Infrastructure;
 using Infrastructure.AI;
 using Infrastructure.Attribute;
+using Infrastructure.Cache;
 using Infrastructure.Model;
-using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
 using NLog;
 using ZR.Model.AI;
@@ -18,16 +18,21 @@ namespace ZR.ServiceCore.AI.Governance
     {
         private static readonly Logger Logger = LogManager.GetCurrentClassLogger();
         private static readonly object ReservationLock = new();
-        private static readonly SemaphoreSlim QuotaGate = new(1, 1);
+        // ⚠️ 单实例假设：并发计数与在途预留是进程内状态，多实例部署时各进程独立计数，
+        // 实际并发上限 = 实例数 × 配置值（限流被放大）。需要严格全局并发时，应改用 Redis 等
+        // 分布式计数（项目已有 Infrastructure/Cache/CacheStore、RedisServer 可复用）。
         private static readonly Dictionary<string, int> ConcurrentCounts = new(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, ActiveReservation> ActiveReservations = new(StringComparer.OrdinalIgnoreCase);
+        /// <summary>分钟限流键过期时间（分钟）：需覆盖一个分钟桶并留裕量，防止跨分钟边界丢计数。</summary>
+        private const int ChatRateWindowExpireMinutes = 2;
+        // ⚠️ 单实例/单库假设：计量断路器是进程内全局开关，任一 DB 读写失败即对所有租户/用户关闭普通 AI
+        // 调用（fail-closed），由后续任一次成功落库自动恢复。多实例下各进程独立判定；若启用多租户分库，
+        // 应改为按租户隔离的断路器，避免单个租户 DB 抖动熔断全站。
         private static volatile bool AccountingHealthy = true;
-        private readonly IMemoryCache _cache;
         private readonly AiOptions _options;
 
-        public AiCallGovernanceService(IMemoryCache cache, IOptions<OptionsSetting> options)
+        public AiCallGovernanceService(IOptions<OptionsSetting> options)
         {
-            _cache = cache;
             _options = options.Value?.AiOptions ?? new AiOptions();
         }
 
@@ -40,12 +45,15 @@ namespace ZR.ServiceCore.AI.Governance
         {
             request ??= new AiCallRequest();
             var actor = AiCallActorScope.Current;
-            var tenantId = Normalize(request.TenantId, Normalize(actor?.TenantId, App.GetCurrentTenantId()));
             var user = App.HttpContext?.GetCurrentUser();
-            var userId = request.UserId > 0 ? request.UserId : actor?.UserId > 0 ? actor.UserId : user?.UserId ?? 0;
-            var userName = Normalize(request.UserName, Normalize(actor?.UserName, user?.UserName));
-            var roleIds = request.RoleIds?.Count > 0
-                ? request.RoleIds
+            // 身份只取可信来源：后台/异步调用优先 AiCallActorScope（由可信代码显式声明），HTTP 请求回退登录上下文；
+            // 不接受调用方在 AiCallRequest 中自报身份，避免越权归因或跨用户刷额度。
+            var tenantId = Normalize(actor?.TenantId, App.GetCurrentTenantId());
+            var userId = actor?.UserId > 0 ? actor.UserId : user?.UserId ?? 0;
+            var userName = Normalize(actor?.UserName, user?.UserName);
+            // 角色层策略依赖 RoleIds：HTTP 从登录上下文取，后台从 actor 快照取（缺则视为无角色）。
+            var roleIds = actor?.RoleIds?.Count > 0
+                ? actor.RoleIds
                 : user?.Roles?.Select(x => x.RoleId).ToArray() ?? Array.Empty<long>();
             var scene = Normalize(request.Scene, "unknown").ToLowerInvariant();
             var requestId = Guid.NewGuid().ToString("N");
@@ -53,15 +61,23 @@ namespace ZR.ServiceCore.AI.Governance
             AiModelPrice price = null;
             try
             {
+                // 价格表读多写极少，直接用 SqlSugar 查询缓存：缓存服务由 DbCache 配置决定
+                // （启用 dbCache 走 Redis，否则内存），且 IsAutoRemoveDataCache=true 会在价格变更时自动清缓存。
                 price = await Context.Queryable<AiModelPrice>()
                     .Where(x => x.Status == 0
                         && x.Provider.ToLower() == Normalize(request.Provider, "unknown").ToLowerInvariant()
                         && x.Model.ToLower() == Normalize(request.Model, "unknown").ToLowerInvariant())
+                    .WithCache(60 * 5)
                     .FirstAsync();
             }
             catch (Exception ex)
             {
-                Logger.Warn(ex, "读取 AI 模型价格失败，将按 0 金额继续");
+                // 读价失败（DB 或缓存后端异常）不再继续：金额额度会失去校验依据，用量还会被记成 0。
+                // 与 GetPolicies / GetUsageAsync 同口径：记日志 + 置不健康 + 抛治理异常（fail-closed）。
+                // 健康标志由后续任一次成功落库自动恢复（见 CompleteAsync）。
+                Logger.Warn(ex, "读取 AI 模型价格失败，暂停普通 AI 调用");
+                AccountingHealthy = false;
+                throw new AiGovernanceDeniedException("governance_unavailable", "AI 计量服务暂不可用，请稍后重试");
             }
 
             var estimatedPrompt = Math.Max(0, request.EstimatedPromptTokens);
@@ -98,7 +114,7 @@ namespace ZR.ServiceCore.AI.Governance
             }
 
             var (globalLimits, tenantLimits, subjectLimits, allLimits) =
-                ResolvePolicyLayers(tenantId, userId, roleIds, scene);
+                await ResolvePolicyLayersAsync(tenantId, userId, roleIds, scene);
 
             if (allLimits.Any(x => x.Disabled))
             {
@@ -109,59 +125,87 @@ namespace ZR.ServiceCore.AI.Governance
                 await RejectAsync(lease, "price_missing", "当前模型未配置单价，无法安全执行金额额度校验");
             }
 
-            await QuotaGate.WaitAsync();
-            try
+            var now = DateTime.Now;
+            var dayBegin = now.Date;
+            var monthBegin = new DateTime(now.Year, now.Month, 1);
+
+            // 分钟限流：CacheStore 原子计数（Redis 下为网络调用），本身即原子，不必占锁区，尽早拒绝。
+            if (scene == "ai_chat" && userId > 0
+                && !TryAcquireChatRateSlot(tenantId, userId, now, out var rateMessage))
             {
-                var now = DateTime.Now;
-                if (scene == "ai_chat" && userId > 0 && _options.ChatRateLimitPerMinute > 0)
+                await RejectAsync(lease, "minute_calls", rateMessage);
+            }
+
+            // 额度用量预读：DB 查询放在锁区之外，避免把并发调用串行化（原先这些查询都在全局闸门内）。
+            var probes = new List<QuotaProbe>();
+            CollectProbes(probes, globalLimits, "global");
+            CollectProbes(probes, tenantLimits, $"tenant:{tenantId}");
+            CollectProbes(probes, subjectLimits, $"user:{tenantId}:{userId}");
+            foreach (var probe in probes)
+            {
+                if (probe.Limit.DailyTokenLimit.HasValue || probe.Limit.DailyAmountLimit.HasValue)
                 {
-                    var minuteBegin = now.AddMinutes(-1);
-                    var recent = 0;
-                    try
+                    probe.Day = await GetUsageAsync(lease, probe.ScopeKey, probe.Limit.SceneFilter, dayBegin);
+                }
+                if (probe.Limit.MonthlyTokenLimit.HasValue || probe.Limit.MonthlyAmountLimit.HasValue)
+                {
+                    probe.Month = await GetUsageAsync(lease, probe.ScopeKey, probe.Limit.SceneFilter, monthBegin);
+                }
+            }
+
+            var concurrencyKeys = new List<(string Key, int Limit)>();
+            foreach (var limit in globalLimits)
+                AddConcurrency(concurrencyKeys, $"global|{limit.SceneFilter}", limit.ConcurrentLimit);
+            foreach (var limit in tenantLimits)
+                AddConcurrency(concurrencyKeys, $"tenant:{tenantId}|{limit.SceneFilter}", limit.ConcurrentLimit);
+            foreach (var limit in subjectLimits)
+                AddConcurrency(concurrencyKeys, $"user:{tenantId}:{userId}|{limit.SceneFilter}", limit.ConcurrentLimit);
+            concurrencyKeys = concurrencyKeys
+                .GroupBy(x => x.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(x => (x.Key, x.Min(y => y.Limit)))
+                .ToList();
+
+            // 锁区内只做纯内存的复核与预留：在途预留（active）在锁内实时读取，判定口径与原先一致。
+            string rejectReason = null, rejectMessage = null;
+            lock (ReservationLock)
+            {
+                foreach (var probe in probes)
+                {
+                    var active = GetActiveUsage(probe.ReservationKey);
+                    var limit = probe.Limit;
+                    if (limit.DailyTokenLimit.HasValue
+                        && probe.Day.Tokens + active.Tokens + lease.ReservedTokens > limit.DailyTokenLimit.Value)
                     {
-                        recent = await Context.Queryable<AiCallLog>()
-                            .Where(x => x.TenantId == tenantId && x.UserId == userId
-                                && x.Scene == "ai_chat" && x.CreateTime >= minuteBegin
-                                && x.Status != "rejected")
-                            .CountAsync();
+                        rejectReason = "daily_token";
+                        rejectMessage = "今日 AI Token 额度已用尽";
+                        break;
                     }
-                    catch (Exception ex)
+                    if (limit.MonthlyTokenLimit.HasValue
+                        && probe.Month.Tokens + active.Tokens + lease.ReservedTokens > limit.MonthlyTokenLimit.Value)
                     {
-                        AccountingHealthy = false;
-                        Logger.Warn(ex, "读取 AI 分钟额度失败，已关闭普通 AI 调用");
-                        await RejectAsync(lease, "governance_unavailable", "AI 额度计量暂不可用，请稍后重试");
+                        rejectReason = "monthly_token";
+                        rejectMessage = "本月 AI Token 额度已用尽";
+                        break;
                     }
-                    var activeCalls = GetActiveCount($"user:{tenantId}:{userId}|ai_chat");
-                    if (recent + activeCalls >= _options.ChatRateLimitPerMinute)
+                    if (limit.DailyAmountLimit.HasValue
+                        && probe.Day.Amount + active.Amount + lease.ReservedAmount > limit.DailyAmountLimit.Value)
                     {
-                        await RejectAsync(lease, "minute_calls", $"发送过于频繁，请稍后再试（每分钟最多 {_options.ChatRateLimitPerMinute} 次模型调用）");
+                        rejectReason = "daily_amount";
+                        rejectMessage = "今日 AI 金额额度已用尽";
+                        break;
+                    }
+                    if (limit.MonthlyAmountLimit.HasValue
+                        && probe.Month.Amount + active.Amount + lease.ReservedAmount > limit.MonthlyAmountLimit.Value)
+                    {
+                        rejectReason = "monthly_amount";
+                        rejectMessage = "本月 AI 金额额度已用尽";
+                        break;
                     }
                 }
 
-                var dayBegin = now.Date;
-                var monthBegin = new DateTime(now.Year, now.Month, 1);
-                foreach (var limit in globalLimits)
-                    await CheckQuotaAsync(lease, limit, "global", dayBegin, monthBegin);
-                foreach (var limit in tenantLimits)
-                    await CheckQuotaAsync(lease, limit, $"tenant:{tenantId}", dayBegin, monthBegin);
-                foreach (var limit in subjectLimits)
-                    await CheckQuotaAsync(lease, limit, $"user:{tenantId}:{userId}", dayBegin, monthBegin);
-
-                var concurrencyKeys = new List<(string Key, int Limit)>();
-                foreach (var limit in globalLimits)
-                    AddConcurrency(concurrencyKeys, $"global|{limit.SceneFilter}", limit.ConcurrentLimit);
-                foreach (var limit in tenantLimits)
-                    AddConcurrency(concurrencyKeys, $"tenant:{tenantId}|{limit.SceneFilter}", limit.ConcurrentLimit);
-                foreach (var limit in subjectLimits)
-                    AddConcurrency(concurrencyKeys, $"user:{tenantId}:{userId}|{limit.SceneFilter}", limit.ConcurrentLimit);
-                concurrencyKeys = concurrencyKeys
-                    .GroupBy(x => x.Key, StringComparer.OrdinalIgnoreCase)
-                    .Select(x => (x.Key, x.Min(y => y.Limit)))
-                    .ToList();
-
-                var concurrencyDenied = false;
-                lock (ReservationLock)
+                if (rejectReason == null)
                 {
+                    var concurrencyDenied = false;
                     foreach (var item in concurrencyKeys)
                     {
                         ConcurrentCounts.TryGetValue(item.Key, out var current);
@@ -172,7 +216,12 @@ namespace ZR.ServiceCore.AI.Governance
                         }
                     }
 
-                    if (!concurrencyDenied)
+                    if (concurrencyDenied)
+                    {
+                        rejectReason = "concurrency";
+                        rejectMessage = "AI 并发请求数已达上限，请稍后重试";
+                    }
+                    else
                     {
                         foreach (var item in concurrencyKeys)
                         {
@@ -187,14 +236,14 @@ namespace ZR.ServiceCore.AI.Governance
                         };
                     }
                 }
-                if (concurrencyDenied)
-                    await RejectAsync(lease, "concurrency", "AI 并发请求数已达上限，请稍后重试");
-                return lease;
             }
-            finally
+
+            // 拒答落库（DB 写入）移出锁区，避免拒答洪峰把全局串行时间拉长
+            if (rejectReason != null)
             {
-                QuotaGate.Release();
+                await RejectAsync(lease, rejectReason, rejectMessage);
             }
+            return lease;
         }
 
         /// <summary>
@@ -238,19 +287,19 @@ namespace ZR.ServiceCore.AI.Governance
                 }
                 await Context.Insertable(new AiCallLog
                 {
-                    Scene = Clip(lease.Scene, 64),
+                    Scene = AiHelper.Truncate(lease.Scene, 64),
                     Provider = lease.Provider,
                     Model = lease.Model,
                     TenantId = lease.TenantId,
-                    RequestId = Clip(lease.RequestId, 64),
-                    TraceId = Clip(lease.TraceId, 64),
+                    RequestId = AiHelper.Truncate(lease.RequestId, 64),
+                    TraceId = AiHelper.Truncate(lease.TraceId, 64),
                     Success = outcome.Success ? 1 : 0,
-                    Status = Clip(outcome.Status ?? (outcome.Success ? "success" : "unknown"), 32),
-                    ErrorType = Clip(outcome.ErrorType, 64),
-                    ErrorMsg = Clip(outcome.ErrorMessage, 1000),
+                    Status = AiHelper.Truncate(outcome.Status ?? (outcome.Success ? "success" : "unknown"), 32),
+                    ErrorType = AiHelper.Truncate(outcome.ErrorType, 64),
+                    ErrorMsg = AiHelper.Truncate(outcome.ErrorMessage, 1000),
                     HttpStatusCode = outcome.HttpStatusCode,
                     DurationMs = Math.Max(0, (long)(DateTime.Now - lease.StartedAt).TotalMilliseconds),
-                    ProviderRequestId = Clip(outcome.ProviderRequestId, 128),
+                    ProviderRequestId = AiHelper.Truncate(outcome.ProviderRequestId, 128),
                     IsStream = lease.IsStream ? 1 : 0,
                     PromptTokens = outcome.PromptTokens,
                     CompletionTokens = outcome.CompletionTokens,
@@ -276,25 +325,22 @@ namespace ZR.ServiceCore.AI.Governance
             }
         }
 
-        public void InvalidatePolicyCache(string tenantId = null)
-        {
-            if (!string.IsNullOrWhiteSpace(tenantId))
-            {
-                _cache.Remove(CacheKey(tenantId));
-                return;
-            }
-            // IMemoryCache 不支持按前缀删除；版本号使所有既有项立即失效。
-            PolicyCacheVersion++;
-        }
-
-        public AiQuotaSnapshot GetMyQuota(string scene = "ai_chat")
+        /// <summary>
+        /// 获取当前用户在指定场景下的 AI 额度快照，包含已用额度和剩余额度。
+        /// </summary>
+        /// <param name="scene"></param>
+        /// <returns></returns>
+        public async Task<AiQuotaSnapshot> GetMyQuotaAsync(string scene = "ai_chat")
         {
             scene = Normalize(scene, "ai_chat").ToLowerInvariant();
             var actor = AiCallActorScope.Current;
-            var tenantId = Normalize(actor?.TenantId, App.GetCurrentTenantId());
             var user = App.HttpContext?.GetCurrentUser();
+            var tenantId = Normalize(actor?.TenantId, App.GetCurrentTenantId());
             var userId = actor?.UserId > 0 ? actor.UserId : user?.UserId ?? 0;
-            var roleIds = user?.Roles?.Select(x => x.RoleId).ToArray() ?? Array.Empty<long>();
+            // 与 BeginAsync 同口径：角色层策略也需覆盖后台/异步调用（actor 快照优先）。
+            var roleIds = actor?.RoleIds?.Count > 0
+                ? actor.RoleIds
+                : user?.Roles?.Select(x => x.RoleId).ToArray() ?? Array.Empty<long>();
 
             var snapshot = new AiQuotaSnapshot
             {
@@ -310,7 +356,7 @@ namespace ZR.ServiceCore.AI.Governance
                 return snapshot;
             }
 
-            var (_, _, _, allLimits) = ResolvePolicyLayers(tenantId, userId, roleIds, scene);
+            var (_, _, _, allLimits) = await ResolvePolicyLayersAsync(tenantId, userId, roleIds, scene);
 
             if (allLimits.Any(x => x.Disabled))
             {
@@ -328,8 +374,8 @@ namespace ZR.ServiceCore.AI.Governance
                 : "*";
             var lease = new AiCallLease { TenantId = tenantId, UserId = userId };
             var now = DateTime.Now;
-            var dayUsage = GetUsage(lease, $"user:{tenantId}:{userId}", sceneFilter, now.Date);
-            var monthUsage = GetUsage(lease, $"user:{tenantId}:{userId}", sceneFilter, new DateTime(now.Year, now.Month, 1));
+            var dayUsage = await GetUsageAsync(lease, $"user:{tenantId}:{userId}", sceneFilter, now.Date);
+            var monthUsage = await GetUsageAsync(lease, $"user:{tenantId}:{userId}", sceneFilter, new DateTime(now.Year, now.Month, 1));
             snapshot.DailyTokenUsed = dayUsage.Tokens;
             snapshot.DailyAmountUsed = dayUsage.Amount;
             snapshot.MonthlyTokenUsed = monthUsage.Tokens;
@@ -337,10 +383,10 @@ namespace ZR.ServiceCore.AI.Governance
             return snapshot;
         }
 
-        private (List<PolicyLimit> Global, List<PolicyLimit> Tenant, List<PolicyLimit> Subject, List<PolicyLimit> All)
-            ResolvePolicyLayers(string tenantId, long userId, IReadOnlyList<long> roleIds, string scene)
+        private async Task<(List<PolicyLimit> Global, List<PolicyLimit> Tenant, List<PolicyLimit> Subject, List<PolicyLimit> All)>
+            ResolvePolicyLayersAsync(string tenantId, long userId, IReadOnlyList<long> roleIds, string scene)
         {
-            var policies = GetPolicies(tenantId);
+            var policies = await GetPoliciesAsync(tenantId);
             var globalLimits = ResolveConstraints(policies, "global", string.Empty, [0], scene);
             var tenantLimits = ResolveConstraints(policies, "tenant", tenantId, [0], scene);
             var roleLimits = ResolveConstraints(policies, "role", tenantId, roleIds, scene);
@@ -359,62 +405,44 @@ namespace ZR.ServiceCore.AI.Governance
             return (globalLimits, tenantLimits, subjectLimits, allLimits);
         }
 
-        private static int PolicyCacheVersion;
-
-        private List<AiAccessPolicy> GetPolicies(string tenantId)
+        /// <summary>
+        /// 读取生效中的治理策略。策略表读多写极少，用 SqlSugar 查询缓存（缓存服务由 DbCache 配置决定：
+        /// 启用 dbCache 走 Redis，否则内存）；策略增删改由 IsAutoRemoveDataCache 自动清缓存，无需手动失效。
+        /// 读取失败 fail-closed（与价格 / 用量读取同口径）。
+        /// </summary>
+        private async Task<List<AiAccessPolicy>> GetPoliciesAsync(string tenantId)
         {
-            return _cache.GetOrCreate(CacheKey(tenantId), entry =>
+            try
             {
-                entry.AbsoluteExpirationRelativeToNow = TimeSpan.FromSeconds(30);
-                try
-                {
-                    return Context.Queryable<AiAccessPolicy>()
-                        .Where(x => x.Status == 0 && (x.ScopeType == "global" || x.TenantId == tenantId))
-                        .ToList();
-                }
-                catch (Exception ex)
-                {
-                    Logger.Warn(ex, "读取 AI 治理策略失败，已关闭普通 AI 调用 tenantId={TenantId}", tenantId);
-                    AccountingHealthy = false;
-                    throw new AiGovernanceDeniedException("governance_unavailable", "AI 治理策略暂不可用，请稍后重试");
-                }
-            }) ?? new List<AiAccessPolicy>();
-        }
-
-        private static string CacheKey(string tenantId) => $"ai:policies:{PolicyCacheVersion}:{tenantId}";
-
-        private async Task CheckQuotaAsync(
-            AiCallLease lease, PolicyLimit limit, string scopeKey, DateTime dayBegin, DateTime monthBegin)
-        {
-            if (!limit.HasAnyLimit) return;
-
-            var reservationKey = $"{scopeKey}|{limit.SceneFilter}";
-            var dayUsage = GetUsage(lease, scopeKey, limit.SceneFilter, dayBegin);
-            var monthUsage = GetUsage(lease, scopeKey, limit.SceneFilter, monthBegin);
-            var active = GetActiveUsage(reservationKey);
-            if (limit.DailyTokenLimit.HasValue
-                && dayUsage.Tokens + active.Tokens + lease.ReservedTokens > limit.DailyTokenLimit.Value)
-            {
-                await RejectAsync(lease, "daily_token", "今日 AI Token 额度已用尽");
+                return await Context.Queryable<AiAccessPolicy>()
+                    .Where(x => x.Status == 0 && (x.ScopeType == "global" || x.TenantId == tenantId))
+                    .WithCache(30)
+                    .ToListAsync();
             }
-            if (limit.MonthlyTokenLimit.HasValue
-                && monthUsage.Tokens + active.Tokens + lease.ReservedTokens > limit.MonthlyTokenLimit.Value)
+            catch (Exception ex)
             {
-                await RejectAsync(lease, "monthly_token", "本月 AI Token 额度已用尽");
-            }
-            if (limit.DailyAmountLimit.HasValue
-                && dayUsage.Amount + active.Amount + lease.ReservedAmount > limit.DailyAmountLimit.Value)
-            {
-                await RejectAsync(lease, "daily_amount", "今日 AI 金额额度已用尽");
-            }
-            if (limit.MonthlyAmountLimit.HasValue
-                && monthUsage.Amount + active.Amount + lease.ReservedAmount > limit.MonthlyAmountLimit.Value)
-            {
-                await RejectAsync(lease, "monthly_amount", "本月 AI 金额额度已用尽");
+                Logger.Warn(ex, "读取 AI 治理策略失败，已关闭普通 AI 调用 tenantId={TenantId}", tenantId);
+                AccountingHealthy = false;
+                throw new AiGovernanceDeniedException("governance_unavailable", "AI 治理策略暂不可用，请稍后重试");
             }
         }
 
-        private UsageValue GetUsage(AiCallLease lease, string scopeKey, string sceneFilter, DateTime begin)
+        /// <summary>把某一层级的有效额度策略收集为校验探针（保留 全局 → 租户 → 用户 的判定顺序）。</summary>
+        private static void CollectProbes(List<QuotaProbe> target, IEnumerable<PolicyLimit> limits, string scopeKey)
+        {
+            foreach (var limit in limits)
+            {
+                if (!limit.HasAnyLimit) continue;
+                target.Add(new QuotaProbe
+                {
+                    Limit = limit,
+                    ScopeKey = scopeKey,
+                    ReservationKey = $"{scopeKey}|{limit.SceneFilter}"
+                });
+            }
+        }
+
+        private async Task<UsageValue> GetUsageAsync(AiCallLease lease, string scopeKey, string sceneFilter, DateTime begin)
         {
             try
             {
@@ -432,10 +460,19 @@ namespace ZR.ServiceCore.AI.Governance
                 {
                     query = query.Where(x => x.Scene == sceneFilter);
                 }
+                // 同一次过滤条件只用一条 SQL 取回 Token 与金额两个合计
+                // （原先 SUM(TotalTokens)、SUM(EstimatedAmount) 各发一条，同样的 WHERE 跑了两遍）
+                var sum = await query
+                    .Select(x => new UsageSumRow
+                    {
+                        Tokens = SqlFunc.AggregateSum(x.TotalTokens),
+                        Amount = SqlFunc.AggregateSum(x.EstimatedAmount)
+                    })
+                    .FirstAsync();
                 return new UsageValue
                 {
-                    Tokens = query.Sum(x => x.TotalTokens),
-                    Amount = query.Sum(x => x.EstimatedAmount)
+                    Tokens = sum?.Tokens ?? 0,
+                    Amount = sum?.Amount ?? 0
                 };
             }
             catch (Exception ex)
@@ -459,21 +496,41 @@ namespace ZR.ServiceCore.AI.Governance
             }
         }
 
-        private static int GetActiveCount(string scopeKey)
+        /// <summary>分钟限流计数键：按「租户 + 用户 + 分钟桶」隔离，分钟切换即自然开新窗口。</summary>
+        private static string ChatRateKey(string tenantId, long userId, DateTime now) =>
+            $"ai:chatrate:{tenantId}:{userId}:{now:yyyyMMddHHmm}";
+
+        /// <summary>
+        /// 尝试占用一个分钟限流额度：基于 CacheStore 原子自增，超过上限返回 false。
+        /// RedisServer:open=1 时为跨节点全局计数，否则自动回落进程内内存（单实例语义）。
+        /// 计数异常时放行（fail-open），避免缓存抖动熔断全部对话。
+        /// </summary>
+        private bool TryAcquireChatRateSlot(string tenantId, long userId, DateTime now, out string message)
         {
-            lock (ReservationLock)
+            message = null;
+            var limit = _options.ChatRateLimitPerMinute;
+            if (limit <= 0) return true;
+            long count;
+            try
             {
-                return ActiveReservations.Values.Count(x => x.ScopeKeys.Contains(scopeKey));
+                count = CacheStore.Default.Increment(ChatRateKey(tenantId, userId, now), ChatRateWindowExpireMinutes);
             }
+            catch (Exception ex)
+            {
+                Logger.Warn(ex, "AI 分钟限流计数失败，本次放行 tenantId={TenantId} userId={UserId}", tenantId, userId);
+                return true;
+            }
+            if (count <= limit) return true;
+            message = $"发送过于频繁，请稍后再试（每分钟最多 {limit} 次模型调用）";
+            return false;
         }
 
         private static IReadOnlyList<string> BuildQuotaScopeKeys(string tenantId, long userId, string scene) =>
-            new[]
-            {
+            [
                 "global|*", $"global|{scene}",
                 $"tenant:{tenantId}|*", $"tenant:{tenantId}|{scene}",
                 $"user:{tenantId}:{userId}|*", $"user:{tenantId}:{userId}|{scene}"
-            };
+            ];
 
         private static void AddConcurrency(List<(string Key, int Limit)> items, string key, int? limit)
         {
@@ -524,53 +581,6 @@ namespace ZR.ServiceCore.AI.Governance
                 .ToList();
         }
 
-        internal static PolicyLimit ResolveSingleLayer(
-            IEnumerable<AiAccessPolicy> policies, string scopeType, string tenantId, long subjectId, string scene)
-        {
-            var candidates = policies.Where(x =>
-                string.Equals(x.ScopeType, scopeType, StringComparison.OrdinalIgnoreCase)
-                && string.Equals(x.TenantId ?? string.Empty, tenantId ?? string.Empty, StringComparison.OrdinalIgnoreCase)
-                && x.SubjectId == subjectId);
-            var exact = candidates.FirstOrDefault(x => string.Equals(x.Scene, scene, StringComparison.OrdinalIgnoreCase));
-            var wildcard = candidates.FirstOrDefault(x => x.Scene == "*");
-            if (exact == null) return FromPolicy(wildcard);
-            if (wildcard == null) return FromPolicy(exact);
-            var layers = new[] { FromPolicy(wildcard), FromPolicy(exact) };
-            return new PolicyLimit
-            {
-                HasPolicy = true,
-                Disabled = layers.Any(x => x.Disabled),
-                SceneFilter = layers.Any(x => x.SceneFilter != "*") ? scene : "*",
-                DailyTokenLimit = Min(layers.Select(x => x.DailyTokenLimit)),
-                MonthlyTokenLimit = Min(layers.Select(x => x.MonthlyTokenLimit)),
-                DailyAmountLimit = Min(layers.Select(x => x.DailyAmountLimit)),
-                MonthlyAmountLimit = Min(layers.Select(x => x.MonthlyAmountLimit)),
-                ConcurrentLimit = Min(layers.Select(x => x.ConcurrentLimit))
-            };
-        }
-
-        internal static PolicyLimit ResolveRoleLayer(
-            IEnumerable<AiAccessPolicy> policies, string tenantId, IReadOnlyList<long> roleIds, string scene)
-        {
-            if (roleIds == null || roleIds.Count == 0) return PolicyLimit.Empty;
-            var layers = roleIds
-                .Select(id => ResolveSingleLayer(policies, "role", tenantId, id, scene))
-                .Where(x => x.HasPolicy)
-                .ToList();
-            if (layers.Count == 0) return PolicyLimit.Empty;
-            return new PolicyLimit
-            {
-                HasPolicy = true,
-                Disabled = layers.Any(x => x.Disabled),
-                SceneFilter = layers.Any(x => x.SceneFilter != "*") ? scene : "*",
-                DailyTokenLimit = Min(layers.Select(x => x.DailyTokenLimit)),
-                MonthlyTokenLimit = Min(layers.Select(x => x.MonthlyTokenLimit)),
-                DailyAmountLimit = Min(layers.Select(x => x.DailyAmountLimit)),
-                MonthlyAmountLimit = Min(layers.Select(x => x.MonthlyAmountLimit)),
-                ConcurrentLimit = Min(layers.Select(x => x.ConcurrentLimit))
-            };
-        }
-
         private static PolicyLimit FromPolicy(AiAccessPolicy policy) => policy == null
             ? PolicyLimit.Empty
             : new PolicyLimit
@@ -601,9 +611,6 @@ namespace ZR.ServiceCore.AI.Governance
         private static string Normalize(string value, string fallback) =>
             string.IsNullOrWhiteSpace(value) ? fallback ?? string.Empty : value.Trim();
 
-        private static string Clip(string value, int length) =>
-            string.IsNullOrWhiteSpace(value) ? null : value.Length <= length ? value : value[..length];
-
         internal sealed class PolicyLimit
         {
             public static readonly PolicyLimit Empty = new();
@@ -631,6 +638,30 @@ namespace ZR.ServiceCore.AI.Governance
         {
             public long Tokens { get; set; }
             public decimal Amount { get; set; }
+        }
+
+        /// <summary>
+        /// 额度校验探针：锁区外预读「当天/当月」用量，锁区内再结合在途预留做复核，
+        /// 使 DB 查询不落在全局串行区内；只预读真正配了额度的周期。
+        /// </summary>
+        private sealed class QuotaProbe
+        {
+            public PolicyLimit Limit { get; set; }
+            public string ScopeKey { get; set; }
+            public string ReservationKey { get; set; }
+            public UsageValue Day { get; set; } = new();
+            public UsageValue Month { get; set; } = new();
+        }
+
+        /// <summary>
+        /// 用量聚合查询投影：一条 SQL 同时返回 Token / 金额合计。
+        /// 属性可空——区间内没有记录时 SUM 返回 NULL（SqlSugar 会把 NULL 映射为 null）。
+        /// 公开类型：SqlSugar 构造投影对象需要类型可访问。
+        /// </summary>
+        public sealed class UsageSumRow
+        {
+            public long? Tokens { get; set; }
+            public decimal? Amount { get; set; }
         }
     }
 }

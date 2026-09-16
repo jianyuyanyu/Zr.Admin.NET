@@ -226,8 +226,6 @@ namespace ZR.ServiceCore.SqlSugar
                 }
             }
 
-            EnsureAiGovernanceIndexes(db, migrationErrors);
-            EnsureAiGovernanceDecimalColumns(db, migrationErrors);
             ValidateAiGovernanceSchema(db, migrationErrors);
 
             report.Success = migrationErrors.Count == 0;
@@ -247,128 +245,6 @@ namespace ZR.ServiceCore.SqlSugar
             PrintReport(report);
 
             return report;
-        }
-
-        /// <summary>
-        /// 存量表补列流程不会创建实体上的 SugarIndex，SQL Server 在此幂等补齐
-        /// AI 治理高频查询所需索引。其他数据库的新表仍由 CodeFirst 创建实体索引。
-        /// </summary>
-        private static void EnsureAiGovernanceIndexes(ISqlSugarClient db, List<string> migrationErrors)
-        {
-            if (db.CurrentConnectionConfig.DbType != DbType.SqlServer) return;
-
-            var commands = new[]
-            {
-                """
-                IF OBJECT_ID(N'ai_call_log', N'U') IS NOT NULL
-                   AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_ai_call_quota' AND object_id = OBJECT_ID(N'ai_call_log'))
-                CREATE INDEX [idx_ai_call_quota] ON [ai_call_log] ([TenantId], [UserId], [Scene], [CreateTime])
-                """,
-                """
-                IF OBJECT_ID(N'ai_call_log', N'U') IS NOT NULL
-                   AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'idx_ai_call_time' AND object_id = OBJECT_ID(N'ai_call_log'))
-                CREATE INDEX [idx_ai_call_time] ON [ai_call_log] ([TenantId], [CreateTime] DESC)
-                """,
-                """
-                IF OBJECT_ID(N'ai_call_log', N'U') IS NOT NULL
-                   AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'uk_ai_call_request' AND object_id = OBJECT_ID(N'ai_call_log'))
-                CREATE UNIQUE INDEX [uk_ai_call_request] ON [ai_call_log] ([RequestId]) WHERE [RequestId] IS NOT NULL
-                """,
-                """
-                IF OBJECT_ID(N'ai_access_policy', N'U') IS NOT NULL
-                   AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'uk_ai_policy_scope' AND object_id = OBJECT_ID(N'ai_access_policy'))
-                CREATE UNIQUE INDEX [uk_ai_policy_scope] ON [ai_access_policy] ([ScopeType], [TenantId], [SubjectId], [Scene])
-                """,
-                """
-                IF OBJECT_ID(N'ai_model_price', N'U') IS NOT NULL
-                   AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'uk_ai_model_price' AND object_id = OBJECT_ID(N'ai_model_price'))
-                CREATE UNIQUE INDEX [uk_ai_model_price] ON [ai_model_price] ([Provider], [Model])
-                """
-            };
-
-            foreach (var sql in commands)
-            {
-                try
-                {
-                    db.Ado.ExecuteCommand(sql);
-                }
-                catch (Exception ex)
-                {
-                    migrationErrors.Add($"AI governance index: {ex.Message}");
-                }
-            }
-        }
-
-        /// <summary>
-        /// 存量库把 decimal(18,6) 误建成 varchar(max) 时，幂等改回 decimal。
-        /// 原因：补列解析把带逗号的 decimal(18,6) 当成了 CodeFirst_BigString。
-        /// </summary>
-        private static void EnsureAiGovernanceDecimalColumns(ISqlSugarClient db, List<string> migrationErrors)
-        {
-            if (db.CurrentConnectionConfig.DbType != DbType.SqlServer) return;
-
-            var columns = new (string Table, string Column, bool Nullable)[]
-            {
-                ("ai_call_log", "InputAmount", false),
-                ("ai_call_log", "OutputAmount", false),
-                ("ai_call_log", "EstimatedAmount", false),
-                ("ai_model_price", "InputPricePerMillion", false),
-                ("ai_model_price", "OutputPricePerMillion", false),
-                ("ai_access_policy", "DailyAmountLimit", true),
-                ("ai_access_policy", "MonthlyAmountLimit", true),
-            };
-
-            foreach (var (table, column, nullable) in columns)
-            {
-                try
-                {
-                    RepairSqlServerDecimalColumn(db, table, column, nullable);
-                }
-                catch (Exception ex)
-                {
-                    var msg = $"AI governance column type {table}.{column}: {ex.Message}";
-                    Log.WriteLine(ConsoleColor.Yellow, $"[DbMigration] {msg}");
-                    migrationErrors?.Add(msg);
-                }
-            }
-        }
-
-        private static void RepairSqlServerDecimalColumn(ISqlSugarClient db, string table, string column, bool nullable)
-        {
-            var nullClause = nullable ? "NULL" : "NOT NULL";
-            var defaultName = $"DF_{table}_{column}";
-            var defaultSql = nullable
-                ? string.Empty
-                : $@"
-    IF NOT EXISTS (
-        SELECT 1 FROM sys.default_constraints
-        WHERE parent_object_id = OBJECT_ID(N'{table}') AND name = N'{defaultName}')
-    ALTER TABLE [{table}] ADD CONSTRAINT [{defaultName}] DEFAULT ((0)) FOR [{column}];";
-
-            var sql = $@"
-IF OBJECT_ID(N'{table}', N'U') IS NOT NULL
-AND EXISTS (
-    SELECT 1
-    FROM sys.columns c
-    INNER JOIN sys.types t ON c.user_type_id = t.user_type_id
-    WHERE c.object_id = OBJECT_ID(N'{table}') AND c.name = N'{column}'
-      AND t.name IN (N'varchar', N'nvarchar', N'char', N'nchar', N'text', N'ntext'))
-BEGIN
-    DECLARE @df sysname;
-    SELECT @df = dc.name
-    FROM sys.default_constraints dc
-    INNER JOIN sys.columns c ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id
-    WHERE dc.parent_object_id = OBJECT_ID(N'{table}') AND c.name = N'{column}';
-    IF @df IS NOT NULL EXEC(N'ALTER TABLE [{table}] DROP CONSTRAINT [' + @df + N']');
-
-    UPDATE [{table}]
-    SET [{column}] = {(nullable ? "NULL" : "N'0'")}
-    WHERE TRY_CONVERT(decimal(18,6), [{column}]) IS NULL;
-
-    ALTER TABLE [{table}] ALTER COLUMN [{column}] decimal(18,6) {nullClause};
-    {defaultSql}
-END";
-            db.Ado.ExecuteCommand(sql);
         }
 
         private static void ValidateAiGovernanceSchema(ISqlSugarClient db, List<string> migrationErrors)
@@ -562,8 +438,6 @@ END";
             {
                 SaveTenantColumnHistory(mainDb, addedColumns);
             }
-
-            EnsureAiGovernanceDecimalColumns(mainDb, null);
         }
 
         /// <summary>

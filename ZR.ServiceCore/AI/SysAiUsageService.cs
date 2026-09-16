@@ -11,7 +11,9 @@ namespace ZR.ServiceCore.AI
 {
     /// <summary>
     /// AI token 用量统计：时间窗汇总、按用户聚合、调用明细。
-    /// 可见范围：普通用户强制当前登录人；管理员可看全量或指定用户。
+    /// 权限边界：接口级权限码由 AiUsageController 的 ActionPermissionFilter 负责，本服务不重复校验，
+    /// 只按 isAdmin 决定数据范围——false 强制当前登录人，true 可看本租户/全平台（平台管理员）。
+    /// 非 HTTP 调用方须自行鉴权后再调用本服务。
     /// </summary>
     [AppService(ServiceType = typeof(ISysAiUsageService), ServiceLifetime = LifeTime.Transient)]
     public class SysAiUsageService : BaseService<AiCallLog>, ISysAiUsageService
@@ -22,7 +24,6 @@ namespace ZR.ServiceCore.AI
         /// </summary>
         public AiUsageSummaryDto GetSummary(AiUsageQueryDto parm, bool isAdmin)
         {
-            EnsureUsageAccess(isAdmin);
             var (begin, end) = ResolveRange(parm);
             // SqlSugar 的 Queryable 可变：一次 GroupBy 会留在同一对象上。
             // 按天聚合后再按场景聚合，会变成 GROUP BY 日期+场景，前端只显示场景名就像重复。
@@ -127,7 +128,6 @@ namespace ZR.ServiceCore.AI
         /// </summary>
         public PagedInfo<AiUsageUserDto> GetUserAggregate(AiUsageQueryDto parm, bool isAdmin)
         {
-            EnsureUsageAccess(isAdmin);
             var (begin, end) = ResolveRange(parm);
 
             var pageIndex = parm.PageNum <= 0 ? 1 : parm.PageNum;
@@ -175,7 +175,6 @@ namespace ZR.ServiceCore.AI
         /// </summary>
         public PagedInfo<AiUsageLogDto> GetList(AiUsageQueryDto parm, bool isAdmin)
         {
-            EnsureUsageAccess(isAdmin);
             var (begin, end) = ResolveRange(parm);
             var page = GetPages(BuildWhere(parm, isAdmin, begin, end), parm, m => m.CreateTime, OrderByType.Desc);
 
@@ -190,7 +189,6 @@ namespace ZR.ServiceCore.AI
 
         public List<AiUsageLogDto> GetExportList(AiUsageQueryDto parm, bool isAdmin)
         {
-            EnsureUsageAccess(isAdmin);
             var (begin, end) = ResolveRange(parm);
             return Queryable()
                 .Where(BuildWhere(parm, isAdmin, begin, end))
@@ -248,7 +246,7 @@ namespace ZR.ServiceCore.AI
                 exp = exp.And(m => m.TenantId == App.GetCurrentTenantId()
                     && m.UserId == DataScopeExtensions.GetCurrentUserId());
             }
-            else if (!IsPlatformAdmin())
+            else if (!AiPermissionHelper.IsPlatformAdmin())
             {
                 exp = exp.And(m => m.TenantId == App.GetCurrentTenantId());
                 if (parm.UserId.HasValue) exp = exp.And(m => m.UserId == parm.UserId.Value);
@@ -284,19 +282,5 @@ namespace ZR.ServiceCore.AI
             return row?.DurationMs ?? 0;
         }
 
-        private static bool IsPlatformAdmin()
-        {
-            var user = App.HttpContext?.GetCurrentUser();
-            return user?.IsAdmin() == true
-                && string.Equals(App.GetCurrentTenantId(), App.MainDbConfigId, StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static void EnsureUsageAccess(bool adminView)
-        {
-            if (!adminView) return;
-            var user = App.HttpContext?.GetCurrentUser();
-            if (user == null || (user.IsAdmin() != true && !user.HasPermission("ai:usage:list")))
-                throw new CustomException("当前账号没有 AI 调用监控权限");
-        }
     }
 }

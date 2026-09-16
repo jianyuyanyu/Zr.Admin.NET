@@ -1,6 +1,5 @@
 using Infrastructure;
 using Infrastructure.Attribute;
-using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using NLog;
 using System.Text;
@@ -119,10 +118,11 @@ namespace ZR.ServiceCore.AI.Charts
                 return null;
             }
 
-            var perms = LoadPerms(userId);
+            var perms = AiPermissionHelper.TryLoadPerms(_permissionService, userId);
             if (perms == null)
             {
-                return AiToolExecResult.Error("无法校验权限，请稍后重试");
+                // 权限计算失败（≠"无权限"）：提示可重试，不引导用户去申请授权
+                return AiToolExecResult.Error("暂时无法校验权限，请稍后重试。");
             }
 
             JObject args;
@@ -150,8 +150,9 @@ namespace ZR.ServiceCore.AI.Charts
             }
             if (!HasDatasetPerm(perms, provider.Permission))
             {
+                // 不回显权限码，避免经模型转述把权限编码透给无权用户
                 return AiToolExecResult.Error(
-                    $"你没有查看「{provider.Title}」图表的权限（需要 {provider.Permission}），请联系管理员授权。");
+                    $"你没有查看「{provider.Title}」图表的权限，请联系管理员授权。");
             }
 
             var grain = NormalizeGrain(args["grain"]?.Value<string>(), provider);
@@ -282,28 +283,12 @@ namespace ZR.ServiceCore.AI.Charts
 
         private static bool HasDatasetPerm(List<string> perms, string permission)
         {
-            if (perms.Contains(GlobalConstant.AdminPerm))
-            {
-                return true;
-            }
+            // 数据集未声明权限（或声明为 common）表示登录即可查看；其余走统一的管理员/精确匹配口径
             if (string.IsNullOrWhiteSpace(permission) || permission == "common")
             {
                 return true;
             }
-            return perms.Contains(permission);
-        }
-
-        private List<string> LoadPerms(long userId)
-        {
-            try
-            {
-                return _permissionService.GetMenuPermission(new SysUserDto { UserId = userId });
-            }
-            catch (Exception ex)
-            {
-                _logger.Error(ex, "AiChartToolProvider 计算用户权限失败 userId={UserId}", userId);
-                return null;
-            }
+            return AiPermissionHelper.HasPerm(perms, permission);
         }
     }
 }

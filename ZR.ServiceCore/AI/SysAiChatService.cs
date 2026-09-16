@@ -206,7 +206,7 @@ namespace ZR.ServiceCore.AI
         #region 对话编排
 
         /// <summary>
-        /// 
+        /// 进行一次聊天交互
         /// </summary>
         /// <param name="sessionId">会话ID</param>
         /// <param name="userId">用户ID</param>
@@ -484,10 +484,12 @@ namespace ZR.ServiceCore.AI
         /// <summary>
         /// 组装发给模型的 function calling 工具数组。
         /// 只取 Name/Description/Parameters——Label/Permission 属前端展示与清单过滤字段，不参与模型请求。
+        /// 与 GET aichat/tools 共用同一份权限过滤结果：无权限的工具既不出现在清单里，也不会下发给模型，
+        /// 避免"清单隐藏、模型仍可调用"的口径不一致。
         /// </summary>
-        private object[] BuildToolObjects()
+        private object[] BuildToolObjects(long userId)
         {
-            return BuildToolDefs()
+            return GetAuthorizedToolDefs(userId)
                 .Select(def => (object)new
                 {
                     type = "function",
@@ -497,47 +499,46 @@ namespace ZR.ServiceCore.AI
         }
 
         /// <summary>
-        /// 当前用户可见的工具展示名清单（GET aichat/tools）。
-        /// 只返回 Name/Label 两个展示字段，不含 Description，避免把工具能力细节透给前端；
-        /// 声明了 Permission 的工具仅对有权限用户返回，防止受限能力名被无权用户看到。
+        /// 当前用户可用的工具定义（内置工具 + 通过权限校验的扩展工具）。
+        /// 模型 function calling 与前端工具清单（GET aichat/tools）共用此集合，避免两处过滤口径漂移；
+        /// 声明了 Permission 的工具仅对有权限用户返回，权限计算失败按无权限处理（不下发受限工具）。
         /// </summary>
-        public Task<List<AiToolCatalogItemDto>> GetMyToolCatalogAsync(long userId)
+        private List<AiToolDef> GetAuthorizedToolDefs(long userId)
         {
             var defs = BuildToolDefs();
-            var items = new List<AiToolCatalogItemDto>(defs.Count);
-            // 按需加载：只有存在受限工具时才查权限，普通用户不产生额外开销
+            var items = new List<AiToolDef>(defs.Count);
+            // 按需加载：只有存在受限工具时才查权限，普通用户不产生额外开销；
+            // 权限计算失败（返回 null）只查一次，并按"不可用"处理（fail-closed），不下发受限工具
             List<string> perms = null;
+            var permsLoaded = false;
             foreach (var def in defs)
             {
                 if (def == null || string.IsNullOrWhiteSpace(def.Name)) continue;
                 if (!string.IsNullOrWhiteSpace(def.Permission))
                 {
-                    perms ??= LoadPerms(userId);
-                    if (perms == null || !(perms.Contains(GlobalConstant.AdminPerm) || perms.Contains(def.Permission)))
+                    if (!permsLoaded)
                     {
-                        continue;
+                        perms = AiPermissionHelper.TryLoadPerms(_permissionService, userId);
+                        permsLoaded = true;
                     }
+                    if (!AiPermissionHelper.HasPerm(perms, def.Permission)) continue;
                 }
-                items.Add(new AiToolCatalogItemDto { Name = def.Name, Label = def.Label });
+                items.Add(def);
             }
-            return Task.FromResult(items);
+            return items;
         }
 
         /// <summary>
-        /// 读取用户权限码集合；失败返回 null（调用方按无权限保守处理，不把受限工具透出）。
-        /// 与图表/日志工具内部的权限口径一致（GetMenuPermission + 管理员隐含放行）。
+        /// 当前用户可见的工具展示名清单（GET aichat/tools）。
+        /// 只返回 Name/Label 两个展示字段，不含 Description，避免把工具能力细节透给前端；
+        /// 与下发给模型的工具数组同源（GetAuthorizedToolDefs），保证前端所见即模型可用。
         /// </summary>
-        private List<string> LoadPerms(long userId)
+        public Task<List<AiToolCatalogItemDto>> GetMyToolCatalogAsync(long userId)
         {
-            try
-            {
-                return _permissionService.GetMenuPermission(new SysUserDto { UserId = userId });
-            }
-            catch (Exception ex)
-            {
-                _logger.Error(ex, "AI 工具清单计算用户权限失败 userId={UserId}", userId);
-                return null;
-            }
+            var items = GetAuthorizedToolDefs(userId)
+                .Select(def => new AiToolCatalogItemDto { Name = def.Name, Label = def.Label })
+                .ToList();
+            return Task.FromResult(items);
         }
 
         /// <summary>
@@ -697,7 +698,7 @@ namespace ZR.ServiceCore.AI
                 IsNewSession = isNewSession,
                 Session = session,
                 Messages = messages,
-                Tools = BuildToolObjects(),
+                Tools = BuildToolObjects(userId),
                 HistoryCount = historyCount
             };
         }

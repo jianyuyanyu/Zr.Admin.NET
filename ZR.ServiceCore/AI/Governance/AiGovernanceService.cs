@@ -13,11 +13,25 @@ using ZR.ServiceCore.Services;
 
 namespace ZR.ServiceCore.AI.Governance
 {
+    /// <summary>
+    /// AI 治理管理（策略额度、模型价格、Provider 诊断）。
+    /// 权限边界：菜单/接口级权限码校验由 AiGovernanceController 的 ActionPermissionFilter 统一负责（单一闸门），
+    /// 本服务不重复校验，只做过滤器无法表达的两类判断：
+    /// ① 数据归属——策略属于哪个租户、是否 global/tenant 级（AuthorizePolicy）；
+    /// ② 请求体语义——PUT 传 Id&lt;=0 时按"新增"而非"修改"要求权限（SavePolicy）。
+    /// 非 HTTP 调用方（后台任务、其他模块）须自行鉴权后再调用本服务。
+    /// </summary>
     [AppService(ServiceType = typeof(IAiGovernanceService), ServiceLifetime = LifeTime.Transient)]
     public class AiGovernanceService : BaseService<AiAccessPolicy>, IAiGovernanceService
     {
         private static readonly HashSet<string> ScopeTypes = new(StringComparer.OrdinalIgnoreCase)
             { "global", "tenant", "role", "user" };
+
+        /// <summary>治理策略新增权限（PUT 传 Id&lt;=0 时按新增判，见 SavePolicy）</summary>
+        private const string PermPolicyAdd = "ai:governance:add";
+        /// <summary>治理策略修改权限</summary>
+        private const string PermPolicyEdit = "ai:governance:edit";
+
         private readonly IAiCallGovernance _callGovernance;
         private readonly ISysRoleService _roleService;
         private readonly AiOptions _options;
@@ -34,10 +48,9 @@ namespace ZR.ServiceCore.AI.Governance
 
         public PagedInfo<AiPolicyListDto> GetPolicyList(AiPolicyQueryDto query)
         {
-            EnsureManager();
             query ??= new AiPolicyQueryDto();
             var currentTenant = App.GetCurrentTenantId();
-            var platform = IsPlatformAdmin();
+            var platform = AiPermissionHelper.IsPlatformAdmin();
             var pageNum = Math.Max(1, query.PageNum);
             var pageSize = query.PageSize <= 0 ? 20 : Math.Min(query.PageSize, 100);
             var total = 0;
@@ -61,15 +74,13 @@ namespace ZR.ServiceCore.AI.Governance
 
         public AiAccessPolicy GetPolicy(long id)
         {
-            EnsureManager();
-            var entity = Queryable().First(x => x.Id == id);
+            var entity = FindPolicy(id);
             AuthorizePolicy(entity);
             return entity;
         }
 
         public List<AiPolicySubjectDto> GetPolicySubjects(string scopeType, string keyword)
         {
-            EnsureManager();
             var key = (keyword ?? string.Empty).Trim();
             if (string.Equals(scopeType, "role", StringComparison.OrdinalIgnoreCase))
             {
@@ -87,8 +98,10 @@ namespace ZR.ServiceCore.AI.Governance
 
         public long SavePolicy(AiPolicySaveDto input)
         {
-            EnsureManager();
             if (input == null) throw new CustomException("策略参数不能为空");
+            // 控制器只按 URL 判权限（PUT=edit、POST=add）；PUT 传 Id<=0 实际是新增，
+            // 只有服务层看得到请求体里的 Id，故此处按实际操作类型再判一次。
+            EnsurePermission(input.Id > 0 ? PermPolicyEdit : PermPolicyAdd);
             NormalizePolicy(input);
             ValidatePolicy(input);
 
@@ -98,12 +111,12 @@ namespace ZR.ServiceCore.AI.Governance
 
             if (input.Id > 0)
             {
-                var entity = GetPolicy(input.Id) ?? throw new CustomException("AI 策略不存在");
+                var entity = FindPolicy(input.Id) ?? throw new CustomException("AI 策略不存在");
+                AuthorizePolicy(entity);
                 MapPolicy(input, entity);
                 entity.Update_by = App.UserName;
                 entity.Update_time = DateTime.Now;
                 Context.Updateable(entity).ExecuteCommand();
-                _callGovernance.InvalidatePolicyCache(entity.TenantId);
                 return entity.Id;
             }
 
@@ -111,17 +124,14 @@ namespace ZR.ServiceCore.AI.Governance
             MapPolicy(input, added);
             added.Create_by = App.UserName;
             added.Create_time = DateTime.Now;
-            var id = Context.Insertable(added).ExecuteReturnIdentity();
-            _callGovernance.InvalidatePolicyCache(added.TenantId);
-            return id;
+            return Context.Insertable(added).ExecuteReturnIdentity();
         }
 
         public int DeletePolicy(long id)
         {
-            var entity = GetPolicy(id) ?? throw new CustomException("AI 策略不存在");
-            var result = Context.Deleteable<AiAccessPolicy>().Where(x => x.Id == id).ExecuteCommand();
-            _callGovernance.InvalidatePolicyCache(entity.TenantId);
-            return result;
+            var entity = FindPolicy(id) ?? throw new CustomException("AI 策略不存在");
+            AuthorizePolicy(entity);
+            return Context.Deleteable<AiAccessPolicy>().Where(x => x.Id == id).ExecuteCommand();
         }
 
         public PagedInfo<AiModelPrice> GetPriceList(AiModelPriceQueryDto query)
@@ -206,8 +216,7 @@ namespace ZR.ServiceCore.AI.Governance
 
         public AiGovernanceCapabilitiesDto GetCapabilities()
         {
-            EnsureManager();
-            var platform = IsPlatformAdmin();
+            var platform = AiPermissionHelper.IsPlatformAdmin();
             return new AiGovernanceCapabilitiesDto
             {
                 TenantId = App.GetCurrentTenantId(),
@@ -378,7 +387,7 @@ namespace ZR.ServiceCore.AI.Governance
             ValidatePositive(input.ConcurrentLimit, "并发");
 
             var currentTenant = App.GetCurrentTenantId();
-            if (!IsPlatformAdmin())
+            if (!AiPermissionHelper.IsPlatformAdmin())
             {
                 if (input.ScopeType is "global" or "tenant") throw new CustomException("只有平台管理员可维护全局和租户策略");
                 input.TenantId = currentTenant;
@@ -396,13 +405,21 @@ namespace ZR.ServiceCore.AI.Governance
                 throw new CustomException("目标角色不存在");
         }
 
+        /// <summary>
+        /// 校验策略实体的租户归属（跨租户越权防护）。调用方必须已通过对应操作的权限校验，
+        /// 本方法不再做"是否有治理权限"的判断——否则只读权限会被写操作顺带放行。
+        /// </summary>
         private void AuthorizePolicy(AiAccessPolicy entity)
         {
-            if (entity == null || IsPlatformAdmin()) return;
-            EnsureManager();
+            if (entity == null || AiPermissionHelper.IsPlatformAdmin()) return;
             if (entity.TenantId != App.GetCurrentTenantId() || entity.ScopeType is "global" or "tenant")
                 throw new CustomException("无权访问该 AI 策略");
         }
+
+        /// <summary>
+        /// 查询策略实体。不做权限与租户判断，调用方须保证接口级权限已校验，并自行调用 AuthorizePolicy。
+        /// </summary>
+        private AiAccessPolicy FindPolicy(long id) => Queryable().First(x => x.Id == id);
 
         private List<AiPolicyListDto> FillPolicyNames(List<AiAccessPolicy> list)
         {
@@ -474,23 +491,22 @@ namespace ZR.ServiceCore.AI.Governance
             if (value.HasValue && value.Value.CompareTo(default) < 0) throw new CustomException($"{name}额度不能小于 0");
         }
 
-        private static bool IsPlatformAdmin()
-        {
-            var user = App.HttpContext?.GetCurrentUser();
-            return user?.IsAdmin() == true
-                && string.Equals(App.GetCurrentTenantId(), App.MainDbConfigId, StringComparison.OrdinalIgnoreCase);
-        }
-
         private static void EnsurePlatformAdmin()
         {
-            if (!IsPlatformAdmin()) throw new CustomException("只有平台管理员可执行该操作");
+            if (!AiPermissionHelper.IsPlatformAdmin()) throw new CustomException("只有平台管理员可执行该操作");
         }
 
-        private static void EnsureManager()
+        /// <summary>
+        /// 权限码校验（管理员隐含放行，见 LoginUser.HasPermission）。
+        /// 仅用于"操作类型由请求体决定、控制器按 URL 无法区分"的场景（当前只有 SavePolicy 的新增/修改分支）；
+        /// 常规操作的类型与接口一一对应，权限码由 Controller 的 ActionPermissionFilter 校验，不在此重复，
+        /// 避免两层各写一份导致口径漂移。
+        /// </summary>
+        private static void EnsurePermission(params string[] permissions)
         {
             var user = App.HttpContext?.GetCurrentUser();
-            var delegated = user?.Permissions?.Any(x => x.StartsWith("ai:governance:", StringComparison.OrdinalIgnoreCase)) == true;
-            if (user == null || (user.IsAdmin() != true && !delegated))
+            if (user == null || permissions == null || permissions.Length == 0
+                || !permissions.Any(p => user.HasPermission(p)))
                 throw new CustomException("当前账号没有 AI 治理管理权限");
         }
 

@@ -7,7 +7,9 @@ namespace ZR.ServiceCore.AI.IService
 {
     /// <summary>
     /// AI token 用量统计：时间窗汇总、按用户聚合、调用明细。
-    /// 个人视角（isAdmin=false）在 Service 内强制按当前登录人过滤，调用方无需传用户 ID。
+    /// 权限约定：接口级权限码由 AiUsageController 的 ActionPermissionFilter 校验，本服务不重复校验；
+    /// isAdmin 只用于决定数据范围——false 强制按当前登录人过滤（调用方无需传用户 ID），
+    /// true 可看本租户或全平台（仅平台管理员）。非 HTTP 调用方须自行鉴权。
     /// </summary>
     public interface ISysAiUsageService : IBaseService<AiCallLog>
     {

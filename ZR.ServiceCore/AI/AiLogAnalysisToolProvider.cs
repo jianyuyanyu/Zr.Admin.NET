@@ -1,4 +1,4 @@
-using Infrastructure;
+using Infrastructure.AI;
 using Infrastructure.Attribute;
 using Newtonsoft.Json.Linq;
 using NLog;
@@ -108,10 +108,17 @@ namespace ZR.ServiceCore.AI
         /// </summary>
         private Task<AiToolExecResult> AnalyzeLoginSecurityAsync(string argsJson, long userId)
         {
-            var perms = LoadPerms(userId);
-            if (perms == null || !(perms.Contains(GlobalConstant.AdminPerm) || perms.Contains(LoginAiPerm)))
+            var perms = AiPermissionHelper.TryLoadPerms(_permissionService, userId);
+            if (perms == null)
             {
-                return Task.FromResult(AiToolExecResult.Error("你没有分析登录日志的权限（需要 monitor:logininfor:ai），如需使用请联系管理员授权。"));
+                // 权限计算失败（≠"无权限"）：只说可重试，避免误导用户去申请授权
+                return Task.FromResult(AiToolExecResult.Error("暂时无法校验权限，请稍后重试。"));
+            }
+            if (!AiPermissionHelper.HasPerm(perms, LoginAiPerm))
+            {
+                // 不回显权限码：无权限时该工具已不在下发模型的工具数组与前端清单中，
+                // 走到这里通常是被绕过校验的异常调用，错误文案不应再透露权限编码
+                return Task.FromResult(AiToolExecResult.Error("你没有分析登录日志的权限，如需使用请联系管理员授权。"));
             }
 
             var input = ParseInput(argsJson);
@@ -131,13 +138,17 @@ namespace ZR.ServiceCore.AI
         /// </summary>
         private Task<AiToolExecResult> AnalyzeOperHealthAsync(string argsJson, long userId)
         {
-            var perms = LoadPerms(userId);
-            if (perms == null || !(perms.Contains(GlobalConstant.AdminPerm) || perms.Contains(OperAiPerm)))
+            var perms = AiPermissionHelper.TryLoadPerms(_permissionService, userId);
+            if (perms == null)
             {
-                return Task.FromResult(AiToolExecResult.Error("你没有分析操作日志的权限（需要 monitor:operlog:ai），如需使用请联系管理员授权。"));
+                return Task.FromResult(AiToolExecResult.Error("暂时无法校验权限，请稍后重试。"));
+            }
+            if (!AiPermissionHelper.HasPerm(perms, OperAiPerm))
+            {
+                return Task.FromResult(AiToolExecResult.Error("你没有分析操作日志的权限，如需使用请联系管理员授权。"));
             }
 
-            var isAdmin = perms.Contains(GlobalConstant.AdminPerm);
+            var isAdmin = AiPermissionHelper.IsAdminPerms(perms);
             var input = ParseInput(argsJson);
             long? scopeUserId = null;
             var owner = "全部用户";
@@ -156,23 +167,6 @@ namespace ZR.ServiceCore.AI
             }
 
             return Task.FromResult(AiToolExecResult.Success(FormatOperMetrics(metrics, owner)));
-        }
-
-        /// <summary>
-        /// 计算用户菜单权限码（含管理员隐含 *:*:* 与租户套餐交集过滤），口径与 ActionPermissionFilter 一致。
-        /// 计算失败时返回 null（不抛异常，由调用方按无权限处理）。
-        /// </summary>
-        private List<string> LoadPerms(long userId)
-        {
-            try
-            {
-                return _permissionService.GetMenuPermission(new SysUserDto { UserId = userId });
-            }
-            catch (Exception ex)
-            {
-                _logger.Error(ex, "AiLogAnalysisToolProvider 计算用户权限失败 userId={UserId}", userId);
-                return null;
-            }
         }
 
         /// <summary>
@@ -245,7 +239,7 @@ namespace ZR.ServiceCore.AI
                     $"{s.Title}({s.Method}) 均{s.AvgElapsed:0}ms/最大{s.MaxElapsed}ms ×{s.Count}次"),
                 "敏感操作(删除/导出/强退/清空)Top 账号：" + FormatTop(m.RiskAccounts, a => $"{a.Name} {a.Count}次"),
                 "错误聚类 Top：" + FormatTop(m.ErrorClusters, c =>
-                    $"[{c.Count}次] {Clip(c.Pattern, 80)}（示例：{Clip(c.SampleErrorMsg ?? "", 80)} / {c.SampleTitle}）")
+                    $"[{c.Count}次] {AiHelper.ClipText(c.Pattern, 80)}（示例：{AiHelper.ClipText(c.SampleErrorMsg ?? "", 80)} / {c.SampleTitle}）")
             };
             if (!string.IsNullOrWhiteSpace(m.SampleNote))
             {
@@ -299,12 +293,6 @@ namespace ZR.ServiceCore.AI
         {
             if (list == null || list.Count == 0) return "无";
             return string.Join("；", list.Select(x => fmt(x)));
-        }
-
-        private static string Clip(string text, int len)
-        {
-            if (string.IsNullOrEmpty(text)) return text;
-            return text.Length <= len ? text : text[..len] + "…";
         }
 
         #endregion 指标格式化

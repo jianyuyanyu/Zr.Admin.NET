@@ -1,6 +1,5 @@
 using Infrastructure;
 using Infrastructure.Attribute;
-using NLog;
 using ZR.Model.AI.Dto;
 using ZR.Model.System.Dto;
 using ZR.ServiceCore.AI.IService;
@@ -20,8 +19,6 @@ namespace ZR.ServiceCore.AI.Charts
 
         /// <summary>单维度返回条数上限，长尾合并为"其他"（风险固定 3 档、操作类型最多 11 种不合并）</summary>
         private const int TopN = 12;
-
-        private static readonly Logger _logger = LogManager.GetCurrentClassLogger();
 
         private readonly ISysOperLogService _operLogService;
         private readonly ISysPermissionService _permissionService;
@@ -138,19 +135,9 @@ namespace ZR.ServiceCore.AI.Charts
         /// </summary>
         private long? ResolveScope(long userId)
         {
-            try
-            {
-                var perms = _permissionService.GetMenuPermission(new SysUserDto { UserId = userId });
-                if (perms != null && perms.Contains(GlobalConstant.AdminPerm))
-                {
-                    return null;
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.Warn(ex, "OperLogChartDatasetProvider 计算用户权限失败，按非管理员处理 userId={UserId}", userId);
-            }
-            return userId;
+            // 权限计算失败（TryLoadPerms 返回 null）时按非管理员处理，安全优先
+            var perms = AiPermissionHelper.TryLoadPerms(_permissionService, userId);
+            return AiPermissionHelper.IsAdminPerms(perms) ? null : userId;
         }
     }
 }

@@ -6,8 +6,9 @@ namespace ZR.Admin.WebApi.Controllers.AI
 {
     /// <summary>
     /// AI token 用量：管理员全站统计 + 个人自助查询。
-    /// 管理端双闸：HttpContext.IsAdmin()（仅超管账号）+ ai:usage:list 权限；
-    /// 个人端权限 ai:usage:mine，Service 内强制按当前登录人过滤。
+    /// 权限统一由本控制器的 ActionPermissionFilter 校验（单一闸门）：
+    /// 管理端 ai:usage:list（导出为 ai:usage:export），个人端 ai:usage:mine；
+    /// Service 侧只决定数据范围（个人端强制按当前登录人过滤，管理端按租户/平台视角收窄）。
     /// </summary>
     [Route("aiUsage")]
     [ApiExplorerSettings(GroupName = "ai")]

@@ -5,16 +5,17 @@ using System.Threading.Tasks;
 
 namespace Infrastructure.AI
 {
-    /// <summary>一次模型 HTTP 调用的治理输入。</summary>
+    /// <summary>
+    /// 一次模型 HTTP 调用的治理输入：只描述“调用特征”（场景/模型/token 预估），不携带调用者身份。
+    /// 调用者身份（租户/用户/角色）一律由治理层从可信上下文解析——后台/异步调用用
+    /// <see cref="AiCallActorScope"/> 显式声明，HTTP 请求读登录上下文；不接受调用方自报 UserId/RoleIds，
+    /// 避免越权归因或跨用户刷额度。
+    /// </summary>
     public sealed class AiCallRequest
     {
         public string Scene { get; set; }
         public string Provider { get; set; }
         public string Model { get; set; }
-        public string TenantId { get; set; }
-        public long UserId { get; set; }
-        public string UserName { get; set; }
-        public IReadOnlyList<long> RoleIds { get; set; } = Array.Empty<long>();
         public int EstimatedPromptTokens { get; set; }
         public int MaxCompletionTokens { get; set; }
         public bool IsStream { get; set; }
@@ -77,8 +78,7 @@ namespace Infrastructure.AI
     {
         Task<AiCallLease> BeginAsync(AiCallRequest request);
         Task CompleteAsync(AiCallLease lease, AiCallOutcome outcome);
-        void InvalidatePolicyCache(string tenantId = null);
-        AiQuotaSnapshot GetMyQuota(string scene = "ai_chat");
+        Task<AiQuotaSnapshot> GetMyQuotaAsync(string scene = "ai_chat");
     }
 
     public sealed class AiGovernanceDeniedException : InvalidOperationException
@@ -101,14 +101,15 @@ namespace Infrastructure.AI
 
         public static AiCallActor Current => CurrentHolder.Value;
 
-        public AiCallActorScope(string tenantId, long userId, string userName)
+        public AiCallActorScope(string tenantId, long userId, string userName, IReadOnlyList<long> roleIds = null)
         {
             _previous = CurrentHolder.Value;
             CurrentHolder.Value = new AiCallActor
             {
                 TenantId = tenantId,
                 UserId = userId,
-                UserName = userName
+                UserName = userName,
+                RoleIds = roleIds ?? Array.Empty<long>()
             };
         }
 
@@ -120,5 +121,11 @@ namespace Infrastructure.AI
         public string TenantId { get; set; }
         public long UserId { get; set; }
         public string UserName { get; set; }
+
+        /// <summary>
+        /// 角色 Id 集合：角色层策略对后台/异步调用生效所必需（HTTP 请求从登录上下文解析，无需设置）。
+        /// 缺省为空集合表示“无角色”，仅全局/租户/用户层策略参与判定。
+        /// </summary>
+        public IReadOnlyList<long> RoleIds { get; set; } = Array.Empty<long>();
     }
 }
