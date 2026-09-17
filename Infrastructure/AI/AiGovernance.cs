@@ -78,6 +78,8 @@ namespace Infrastructure.AI
     {
         Task<AiCallLease> BeginAsync(AiCallRequest request);
         Task CompleteAsync(AiCallLease lease, AiCallOutcome outcome);
+        // 默认值保持字面量：本工程（Infrastructure）不引用 ZR.Model，
+        // 场景常量的唯一来源是 ZR.Model.AI.AiSceneCatalog（改场景名时以那里的常量值为准）。
         Task<AiQuotaSnapshot> GetMyQuotaAsync(string scene = "ai_chat");
     }
 

@@ -2,6 +2,7 @@ using Infrastructure.AI;
 using Microsoft.AspNetCore.Mvc;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using ZR.Model.AI;
 using ZR.Model.AI.Dto;
 using ZR.ServiceCore.AI.IService;
 
@@ -30,7 +31,7 @@ namespace ZR.Admin.WebApi.Controllers.AI
         /// </summary>
         [HttpGet("quota")]
         [ActionPermissionFilter(Permission = "common")]
-        public async Task<IActionResult> Quota([FromQuery] string scene = "ai_chat")
+        public async Task<IActionResult> Quota([FromQuery] string scene = AiSceneCatalog.AiChat)
         {
             return SUCCESS(await _callGovernance.GetMyQuotaAsync(scene));
         }

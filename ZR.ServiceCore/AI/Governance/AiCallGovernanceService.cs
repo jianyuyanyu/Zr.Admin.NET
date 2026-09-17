@@ -130,7 +130,7 @@ namespace ZR.ServiceCore.AI.Governance
             var monthBegin = new DateTime(now.Year, now.Month, 1);
 
             // 分钟限流：CacheStore 原子计数（Redis 下为网络调用），本身即原子，不必占锁区，尽早拒绝。
-            if (scene == "ai_chat" && userId > 0
+            if (scene == AiSceneCatalog.AiChat && userId > 0
                 && !TryAcquireChatRateSlot(tenantId, userId, now, out var rateMessage))
             {
                 await RejectAsync(lease, "minute_calls", rateMessage);
@@ -330,9 +330,9 @@ namespace ZR.ServiceCore.AI.Governance
         /// </summary>
         /// <param name="scene"></param>
         /// <returns></returns>
-        public async Task<AiQuotaSnapshot> GetMyQuotaAsync(string scene = "ai_chat")
+        public async Task<AiQuotaSnapshot> GetMyQuotaAsync(string scene = AiSceneCatalog.AiChat)
         {
-            scene = Normalize(scene, "ai_chat").ToLowerInvariant();
+            scene = Normalize(scene, AiSceneCatalog.AiChat).ToLowerInvariant();
             var actor = AiCallActorScope.Current;
             var user = App.HttpContext?.GetCurrentUser();
             var tenantId = Normalize(actor?.TenantId, App.GetCurrentTenantId());
@@ -392,13 +392,13 @@ namespace ZR.ServiceCore.AI.Governance
             var roleLimits = ResolveConstraints(policies, "role", tenantId, roleIds, scene);
             var userLimits = ResolveConstraints(policies, "user", tenantId, [userId], scene);
             var subjectLimits = roleLimits.Concat(userLimits).ToList();
-            if (subjectLimits.Count == 0 && scene == "ai_chat" && _options.DefaultUserTotalTokens > 0)
+            if (subjectLimits.Count == 0 && scene == AiSceneCatalog.AiChat && _options.DefaultUserTotalTokens > 0)
             {
                 subjectLimits.Add(new PolicyLimit
                 {
                     HasPolicy = true,
                     MonthlyTokenLimit = _options.DefaultUserTotalTokens,
-                    SceneFilter = "ai_chat"
+                    SceneFilter = AiSceneCatalog.AiChat
                 });
             }
             var allLimits = globalLimits.Concat(tenantLimits).Concat(subjectLimits).ToList();

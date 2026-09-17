@@ -1,7 +1,9 @@
 using Microsoft.Extensions.Logging;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.CompilerServices;
 
 [assembly: InternalsVisibleTo("ZR.Workflow")]
@@ -21,6 +23,18 @@ namespace Infrastructure.AI
             LoggerFactory.Create(builder => builder.AddConsole()).CreateLogger<PromptLoader>();
 
         private static readonly TimeSpan CacheSliding = TimeSpan.FromMinutes(10);
+
+        /// <summary>
+        /// 进程内记录的“读取失败（缺失或为空）”提示词文件名，供治理自检
+        /// （AiGovernanceService.CheckConfiguration）展示，避免"缺提示词"只留在日志里。
+        /// 文件名来自各实际调用点，无需另维护一份场景→提示词映射；某文件后续加载成功会自动移除。
+        /// </summary>
+        private static readonly ConcurrentDictionary<string, byte> MissingFiles = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>读取失败的提示词文件名（升序）。进程内累计；后续加载成功会自动移除。</summary>
+        public static IReadOnlyList<string> GetMissingFiles() =>
+            MissingFiles.Keys.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+
         private readonly string _baseDir;
         private readonly Dictionary<string, (string Text, DateTime Expire)> _cache = new();
 
@@ -64,6 +78,11 @@ namespace Infrastructure.AI
             if (text == null)
             {
                 Logger.LogWarning("提示词文件不存在或为空：{Path}（该 AI 能力调用时将报错）", path);
+                if (!string.IsNullOrWhiteSpace(key)) MissingFiles[key] = 0;
+            }
+            else if (!string.IsNullOrWhiteSpace(key))
+            {
+                MissingFiles.TryRemove(key, out _);
             }
 
             lock (_cache)

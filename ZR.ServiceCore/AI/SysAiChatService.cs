@@ -43,6 +43,16 @@ namespace ZR.ServiceCore.AI
         /// <summary>单条用户消息最大长度（与请求 DTO 校验一致，服务端兜底防超长文本烧 token）</summary>
         private const int MaxUserMessageLength = 2000;
 
+        /// <summary>内置工具名（工具名全局唯一：与 Provider 注册的同名工具冲突时以内置为准）。</summary>
+        private const string ToolQueryMySchedules = "query_my_schedules";
+        private const string ToolParseSchedule = "parse_schedule";
+        private const string ToolGenerateWeeklyReport = "generate_weekly_report";
+
+        private static readonly HashSet<string> BuiltInToolNames = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ToolQueryMySchedules, ToolParseSchedule, ToolGenerateWeeklyReport
+        };
+
         /// <param name="sysAi">系统 AI 服务（日程解析/周报）</param>
         /// <param name="scheduleService">日程服务（日程查询工具）</param>
         /// <param name="llm">大模型调用网关（封装静态 AiLlmClient，便于测试替换）</param>
@@ -67,11 +77,20 @@ namespace ZR.ServiceCore.AI
                 foreach (var def in providerDefs)
                 {
                     if (def == null || string.IsNullOrWhiteSpace(def.Name)) continue;
-                    defs.Add(def);
-                    if (!_toolProviderMap.ContainsKey(def.Name))
+                    // 工具名全局唯一（CONTRIBUTING 约定）。重复注册若静默保留，同一工具会在前端清单
+                    // 与模型请求里各出现两次，且模型调用时归属不确定，因此丢弃并告警。
+                    if (BuiltInToolNames.Contains(def.Name))
                     {
-                        _toolProviderMap.Add(def.Name, provider);
+                        _logger.Warn($"AI 扩展工具名与内置工具重复已忽略：{def.Name}（提供者 {provider.ProviderName}）");
+                        continue;
                     }
+                    if (_toolProviderMap.TryGetValue(def.Name, out var owner))
+                    {
+                        _logger.Warn($"AI 工具名重复已忽略：{def.Name}（已由 {owner.ProviderName} 注册，跳过 {provider.ProviderName} 的重复定义）");
+                        continue;
+                    }
+                    defs.Add(def);
+                    _toolProviderMap.Add(def.Name, provider);
                 }
             }
             _providerToolDefs = defs;
@@ -228,7 +247,7 @@ namespace ZR.ServiceCore.AI
                 AiLlmClient.ChatToolResult turn;
                 try
                 {
-                    turn = await _llm.ChatWithToolsAsync(context.Options, context.Messages.ToArray(), context.Tools, "ai_chat");
+                    turn = await _llm.ChatWithToolsAsync(context.Options, context.Messages.ToArray(), context.Tools, AiSceneCatalog.AiChat);
                 }
                 catch (Exception ex)
                 {
@@ -293,7 +312,7 @@ namespace ZR.ServiceCore.AI
                 AiLlmClient.ChatToolResult turn = null;
                 // 模型流式调用：逐块转发增量文本，结束时聚合出本轮完整结果。
                 // 注意：迭代段内不得被 try/catch 包裹（含 yield return），异常向上冒出由调用方转 error 事件。
-                await foreach (var chunk in _llm.StreamChatWithToolsAsync(context.Options, context.Messages.ToArray(), context.Tools, "ai_chat", cancellationToken).WithCancellation(cancellationToken))
+                await foreach (var chunk in _llm.StreamChatWithToolsAsync(context.Options, context.Messages.ToArray(), context.Tools, AiSceneCatalog.AiChat, cancellationToken).WithCancellation(cancellationToken))
                 {
                     if (chunk.Type == "delta" && !string.IsNullOrEmpty(chunk.Text))
                     {
@@ -428,6 +447,9 @@ namespace ZR.ServiceCore.AI
         /// <summary>
         /// 全部工具定义：内置办工工具 + 各模块 Provider 注册的扩展工具。
         /// 模型 function calling 与前端工具清单（GET aichat/tools）共用此集合，避免两处各维护一份导致漂移。
+        /// 内置工具不声明 Permission：它们只访问“当前登录用户自己的数据”（日程/周报，按 userId 隔离），
+        /// 不存在跨用户越权面；若声明权限码而菜单未授权，会把这些工具从所有人的清单里一并隐藏（功能回归）。
+        /// 需要按人/按角色控制的内置能力，请改为 Provider 注册并声明 Permission。
         /// </summary>
         private List<AiToolDef> BuildToolDefs()
         {
@@ -435,7 +457,7 @@ namespace ZR.ServiceCore.AI
             {
                 new AiToolDef
                 {
-                    Name = "query_my_schedules",
+                    Name = ToolQueryMySchedules,
                     Label = "日程查询",
                     Description = "查询当前登录用户指定日期范围内的日程安排（按截止/完成/创建时间任一命中，含已完成）。不传参数默认查最近 7 天。用于“我今天有什么安排/本周日程/某天日程”。",
                     Parameters = new
@@ -451,7 +473,7 @@ namespace ZR.ServiceCore.AI
                 },
                 new AiToolDef
                 {
-                    Name = "parse_schedule",
+                    Name = ToolParseSchedule,
                     Label = "日程解析",
                     Description = "把用户口语化的日程描述解析成结构化日程草稿（标题/内容/优先级/截止/提醒）。只生成草稿不落库。用于“帮我记一个日程：...”等表达。",
                     Parameters = new
@@ -466,7 +488,7 @@ namespace ZR.ServiceCore.AI
                 },
                 new AiToolDef
                 {
-                    Name = "generate_weekly_report",
+                    Name = ToolGenerateWeeklyReport,
                     Label = "周报生成",
                     Description = "汇总当前用户本周日程自动生成工作周报草稿（Markdown）。用于“帮我写周报/本周总结”。",
                     Parameters = new

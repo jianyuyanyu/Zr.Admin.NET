@@ -1,6 +1,7 @@
 using Infrastructure.AI;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
+using ZR.Model.AI;
 using ZR.Workflow.Helper;
 using STJson = System.Text.Json;
 
@@ -163,7 +164,7 @@ namespace ZR.Workflow.Service
                 AiLlmClient.ChatToolResult turn;
                 try
                 {
-                    turn = await AiLlmClient.ChatWithToolsAsync(options, messages.ToArray(), tools, "wf_generate").ConfigureAwait(false);
+                    turn = await AiLlmClient.ChatWithToolsAsync(options, messages.ToArray(), tools, AiSceneCatalog.WfGenerate).ConfigureAwait(false);
                 }
                 catch (HttpRequestException ex)
                 {
@@ -807,11 +808,11 @@ namespace ZR.Workflow.Service
             {
                 // 含图片附件：走视觉模型多模态理解（VisionModel 未配置时此方法内部抛友好提示）
                 text = await AiLlmClient.ChatWithImagesAsync(
-                    options, AiHelper.GetPromptOrThrow("approval-suggest.md", "审批意见建议"), user, imgUrls, "wf_approval_suggest").ConfigureAwait(false);
+                    options, AiHelper.GetPromptOrThrow("approval-suggest.md", "审批意见建议"), user, imgUrls, AiSceneCatalog.WfApprovalSuggest).ConfigureAwait(false);
             }
             else
             {
-                text = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("approval-suggest.md", "审批意见建议"), user, "wf_approval_suggest").ConfigureAwait(false);
+                text = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("approval-suggest.md", "审批意见建议"), user, AiSceneCatalog.WfApprovalSuggest).ConfigureAwait(false);
             }
             if (string.IsNullOrWhiteSpace(text))
             {
@@ -828,7 +829,7 @@ namespace ZR.Workflow.Service
             var op = string.IsNullOrWhiteSpace(opinion) ? "（未填写意见）" : opinion;
             var user = $"审批动作：{action}\n审批节点：{nodeName}\n审批意见：{op}\n表单内容：{formText}";
 
-            var text = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("flow-review.md", "审批记录摘要"), user, "wf_approval_summary").ConfigureAwait(false);
+            var text = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("flow-review.md", "审批记录摘要"), user, AiSceneCatalog.WfApprovalSummary).ConfigureAwait(false);
             return new WfAiApprovalSummaryResult { Summary = JsonHelper.StripMarkdown(text).Trim() };
         }
 
@@ -862,7 +863,7 @@ namespace ZR.Workflow.Service
             var linksDesc = string.Join("\n", (def.NodeLinks ?? new List<WfNodeLinkDto>()).Select(l => $"- 连线：{NodeLabel(l.SourceNodeId)} → {NodeLabel(l.TargetNodeId)}（条件：{l.ConditionJson ?? "无"}）"));
             var user = $"流程名称：{def.FlowName}\n表单字段（JSON）：{formDesc}\n节点列表：\n{nodesDesc}\n连线列表：\n{linksDesc}";
 
-            var text = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("flow-optimize.md", "流程优化体检"), user, "wf_flow_optimize").ConfigureAwait(false);
+            var text = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("flow-optimize.md", "流程优化体检"), user, AiSceneCatalog.WfFlowOptimize).ConfigureAwait(false);
             return ParseAnalyzeResult(text);
         }
 
@@ -967,7 +968,7 @@ namespace ZR.Workflow.Service
 
             var user = $"可选流程清单：\n{catalog}\n\n用户描述：{input.Description}";
 
-            var text = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("intent-match.md", "自然语言填单"), user, "wf_intent_match").ConfigureAwait(false);
+            var text = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("intent-match.md", "自然语言填单"), user, AiSceneCatalog.WfIntentMatch).ConfigureAwait(false);
             return ParseMatchFillResult(text, candidates);
         }
 
@@ -1078,7 +1079,7 @@ namespace ZR.Workflow.Service
                 AiLlmClient.ChatToolResult turn;
                 try
                 {
-                    turn = await AiLlmClient.ChatWithToolsAsync(options, messages.ToArray(), tools, "wf_instance_summary").ConfigureAwait(false);
+                    turn = await AiLlmClient.ChatWithToolsAsync(options, messages.ToArray(), tools, AiSceneCatalog.WfInstanceSummary).ConfigureAwait(false);
                 }
                 catch (HttpRequestException ex)
                 {
@@ -1262,11 +1263,11 @@ namespace ZR.Workflow.Service
             {
                 var options = AiHelper.EnsureAiEnabled();
                 text = await AiLlmClient.ChatWithImagesAsync(
-                    options, AiHelper.GetPromptOrThrow("risk-check.md", "审批风险预判"), userContext, imgUrls, "wf_risk_check").ConfigureAwait(false);
+                    options, AiHelper.GetPromptOrThrow("risk-check.md", "审批风险预判"), userContext, imgUrls, AiSceneCatalog.WfRiskCheck).ConfigureAwait(false);
             }
             else
             {
-                text = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("risk-check.md", "审批风险预判"), userContext, "wf_risk_check").ConfigureAwait(false);
+                text = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("risk-check.md", "审批风险预判"), userContext, AiSceneCatalog.WfRiskCheck).ConfigureAwait(false);
             }
             if (string.IsNullOrWhiteSpace(text))
             {

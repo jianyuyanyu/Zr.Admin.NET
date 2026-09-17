@@ -306,7 +306,24 @@ namespace ZR.ServiceCore.AI.Governance
             var promptDir = string.IsNullOrWhiteSpace(_options.PromptDir)
                 ? Path.Combine(AppContext.BaseDirectory, "Prompts")
                 : _options.PromptDir;
-            if (!Directory.Exists(promptDir)) result.Warnings.Add("Prompt 目录不存在");
+            if (!Directory.Exists(promptDir))
+            {
+                result.Warnings.Add("Prompt 目录不存在");
+            }
+            else if (Directory.GetFiles(promptDir, "*.md", SearchOption.AllDirectories).Length == 0)
+            {
+                // 目录存在但为空同样是部署事故（发布时漏拷 Prompts），此时所有按文件加载提示词的能力都会报错
+                result.Warnings.Add("Prompt 目录下没有任何 .md 提示词文件");
+            }
+            // 进程启动后实际读取失败的提示词（由 PromptLoader 记录）：让"AI 报缺提示词"在自检页可见，
+            // 不再只留在日志里；文件名来自各调用点，无需在此维护第二份场景→提示词映射。
+            var missingPrompts = PromptLoader.GetMissingFiles();
+            if (missingPrompts.Count > 0)
+            {
+                var shown = string.Join("、", missingPrompts.Take(5));
+                result.Warnings.Add($"以下提示词文件读取失败（对应 AI 能力调用时会直接报错）：{shown}"
+                    + (missingPrompts.Count > 5 ? $" 等共 {missingPrompts.Count} 个" : string.Empty));
+            }
             result.Valid = result.Warnings.Count == 0;
             return result;
         }
@@ -318,7 +335,7 @@ namespace ZR.ServiceCore.AI.Governance
             var watch = Stopwatch.StartNew();
             try
             {
-                var text = await AiLlmClient.ChatAsync(_options, "仅回复 OK", "ping", "health_check");
+                var text = await AiLlmClient.ChatAsync(_options, "仅回复 OK", "ping", AiSceneCatalog.HealthCheck);
                 var log = GetLatestHealthLog();
                 return new AiHealthCheckDto
                 {
@@ -353,7 +370,7 @@ namespace ZR.ServiceCore.AI.Governance
         {
             var traceId = App.HttpContext?.TraceIdentifier;
             return Context.Queryable<AiCallLog>()
-                .Where(x => x.Scene == "health_check" && x.TraceId == traceId)
+                .Where(x => x.Scene == AiSceneCatalog.HealthCheck && x.TraceId == traceId)
                 .OrderBy(x => x.CreateTime, global::SqlSugar.OrderByType.Desc)
                 .First();
         }

@@ -3,6 +3,7 @@ using Infrastructure.Attribute;
 using Infrastructure.Helper;
 using System.Globalization;
 using System.Text.Json;
+using ZR.Model.AI;
 using ZR.Model.Models;
 using ZR.Model.System.Dto;
 using ZR.Model.System.Generate;
@@ -119,7 +120,7 @@ namespace ZR.ServiceCore.AI
             }
 
             var user = BuildTranslatePrompt(sourceLang, targetLangs, items);
-            var text = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("system/lang-translate.md", "多语言翻译"), user, "lang_translate").ConfigureAwait(false);
+            var text = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("system/lang-translate.md", "多语言翻译"), user, AiSceneCatalog.LangTranslate).ConfigureAwait(false);
 
             return ParseTranslateResult(text, sourceLang, targetLangs, items);
         }
@@ -183,7 +184,7 @@ namespace ZR.ServiceCore.AI
                 throw new Exception("调度描述过长，请精简到 200 字以内");
             }
 
-            var reply = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("system/cron-parse.md", "Cron 表达式生成"), $"调度描述：{text}", "cron_parse").ConfigureAwait(false);
+            var reply = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("system/cron-parse.md", "Cron 表达式生成"), $"调度描述：{text}", AiSceneCatalog.CronParse).ConfigureAwait(false);
             return ParseCronResult(reply);
         }
 
@@ -203,7 +204,7 @@ namespace ZR.ServiceCore.AI
             var now = DateTime.Now;
             var user = $"currentTime：{now:yyyy-MM-dd HH:mm}（星期{GetCnWeekday(now.DayOfWeek)}）\nweekStart：1\ntext：{text}";
 
-            var reply = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("system/schedule-parse.md", "日程解析"), user, "schedule_parse").ConfigureAwait(false);
+            var reply = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("system/schedule-parse.md", "日程解析"), user, AiSceneCatalog.ScheduleParse).ConfigureAwait(false);
             return ParseScheduleResult(reply);
         }
 
@@ -253,7 +254,7 @@ namespace ZR.ServiceCore.AI
                 user += $"\n（日程较多，仅提供前 {MaxWeeklyReportItems} 条，汇总时请说明数据已截断）";
             }
 
-            var reply = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("system/schedule-weekly-report.md", "周报汇总"), user, "weekly_report").ConfigureAwait(false);
+            var reply = await AiHelper.ChatSafeAsync(AiHelper.GetPromptOrThrow("system/schedule-weekly-report.md", "周报汇总"), user, AiSceneCatalog.WeeklyReport).ConfigureAwait(false);
             var parsed = ParseWeeklyReportResult(reply);
             parsed.PeriodStart = result.PeriodStart;
             parsed.PeriodEnd = result.PeriodEnd;
@@ -297,7 +298,7 @@ namespace ZR.ServiceCore.AI
 
             var reply = await AiHelper.ChatSafeAsync(
                 AiHelper.GetPromptOrThrow("system/gencode-columns.md", "代码生成列配置推断"),
-                System.Text.Json.JsonSerializer.Serialize(payload), "gen_columns").ConfigureAwait(false);
+                System.Text.Json.JsonSerializer.Serialize(payload), AiSceneCatalog.GenColumns).ConfigureAwait(false);
 
             return ParseGenColumnResult(reply, payload.tableName, dbColumns);
         }
@@ -315,7 +316,7 @@ namespace ZR.ServiceCore.AI
 
             var reply = await AiHelper.ChatSafeAsync(
                 AiHelper.GetPromptOrThrow("system/log-login-analysis.md", "登录日志 AI 安全分析"),
-                System.Text.Json.JsonSerializer.Serialize(metrics, MetricJsonOptions), "login_security").ConfigureAwait(false);
+                System.Text.Json.JsonSerializer.Serialize(metrics, MetricJsonOptions), AiSceneCatalog.LoginSecurity).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(reply))
             {
                 throw new Exception("AI 未返回分析报告，请稍后重试");
@@ -335,7 +336,7 @@ namespace ZR.ServiceCore.AI
 
             var reply = await AiHelper.ChatSafeAsync(
                 AiHelper.GetPromptOrThrow("system/log-oper-analysis.md", "操作日志 AI 健康分析"),
-                System.Text.Json.JsonSerializer.Serialize(metrics, MetricJsonOptions), "oper_health").ConfigureAwait(false);
+                System.Text.Json.JsonSerializer.Serialize(metrics, MetricJsonOptions), AiSceneCatalog.OperHealth).ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(reply))
             {
                 throw new Exception("AI 未返回分析报告，请稍后重试");
