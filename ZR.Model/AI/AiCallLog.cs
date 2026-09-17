@@ -1,10 +1,17 @@
 namespace ZR.Model.AI
 {
     /// <summary>
-    /// AI 调用 token 用量审计流水（每次模型 HTTP 调用一条，供审计/统计）
+    /// AI 调用 token 用量审计流水（每次模型 HTTP 调用一条，供审计/统计）。
+    /// <para>
+    /// 幂等约束：RequestId 上建有唯一索引 uk_ai_call_request，保证同一调用租约在并发/重入结算时只落一行。
+    /// 其生效前提是"重试复用同一租约"——重试必须落在 Infrastructure.AI.AiLlmClient 内部
+    /// （BeginGovernedCallAsync 之后、发送 HTTP 之前）。若把重试提到网关 AiChatLlmGateway，
+    /// 每次重试都会重新 BeginAsync 生成新的 RequestId，唯一约束即形同虚设。
+    /// </para>
     /// </summary>
     [SugarTable("ai_call_log")]
     [Tenant(0)]
+    [SugarIndex("uk_ai_call_request", nameof(RequestId), OrderByType.Asc, true)]
     [SugarIndex("idx_ai_call_quota", nameof(TenantId), OrderByType.Asc)]
     [SugarIndex("idx_ai_call_quota", nameof(UserId), OrderByType.Asc)]
     [SugarIndex("idx_ai_call_quota", nameof(Scene), OrderByType.Asc)]
@@ -30,7 +37,10 @@ namespace ZR.Model.AI
         [SugarColumn(Length = 64, IsNullable = true)]
         public string TenantId { get; set; }
 
-        /// <summary>一次模型 HTTP 调用的唯一标识。</summary>
+        /// <summary>
+        /// 一次模型 HTTP 调用的唯一标识（结算幂等键，见类注释）。
+        /// 由治理层 BeginAsync 生成，列上建唯一索引 uk_ai_call_request：同一租约重复结算只落一行。
+        /// </summary>
         [SugarColumn(Length = 64, IsNullable = true)]
         public string RequestId { get; set; }
 

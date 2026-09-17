@@ -56,6 +56,10 @@ namespace ZR.ServiceCore.AI.Governance
                 ? actor.RoleIds
                 : user?.Roles?.Select(x => x.RoleId).ToArray() ?? Array.Empty<long>();
             var scene = Normalize(request.Scene, "unknown").ToLowerInvariant();
+            // 结算幂等键：RequestId 每租约生成一次，ai_call_log 上建有唯一索引 uk_ai_call_request。
+            // 因此"重试"必须复用同一租约（重试落在 AiLlmClient 内部、BeginGovernedCallAsync 之后），
+            // 若把重试提到网关 AiChatLlmGateway 层，每次重试都会重新 BeginAsync 生成新 GUID，
+            // 唯一索引就挡不住重复落库与重复计费。
             var requestId = Guid.NewGuid().ToString("N");
 
             AiModelPrice price = null;
@@ -316,8 +320,32 @@ namespace ZR.ServiceCore.AI.Governance
             }
             catch (Exception ex)
             {
-                AccountingHealthy = false;
-                Logger.Warn(ex, "写入 AI 调用治理流水失败 requestId={RequestId}", lease.RequestId);
+                // 并发/重入下同一 RequestId 双写时，唯一索引 uk_ai_call_request 会让其中一方插入失败。
+                // 该租约已落库属于"幂等命中"，不能当作计量故障 —— 否则一次并发写失败会把全局会计标记
+                // 置为不健康，熔断全站普通 AI 调用（要到下一次成功落库才恢复）。
+                // 判定刻意不匹配各库各异的唯一键错误码，改为复查该 RequestId 是否已存在：与数据库无关，
+                // 且能覆盖"第一次 AnyAsync 快路径本身失败"的回退场景。
+                var persisted = false;
+                try
+                {
+                    persisted = await Context.Queryable<AiCallLog>().AnyAsync(x => x.RequestId == lease.RequestId);
+                }
+                catch (Exception probeEx)
+                {
+                    // 复查自身失败（DB 不可用等）不得空 catch 吞掉：记录后走不健康分支
+                    Logger.Warn(probeEx, "AI 调用流水唯一键冲突复查失败 requestId={RequestId}", lease.RequestId);
+                }
+
+                if (persisted)
+                {
+                    AccountingHealthy = true;
+                    Logger.Info("AI 调用流水已由并发方写入，按幂等命中处理 requestId={RequestId}", lease.RequestId);
+                }
+                else
+                {
+                    AccountingHealthy = false;
+                    Logger.Warn(ex, "写入 AI 调用治理流水失败 requestId={RequestId}", lease.RequestId);
+                }
             }
             finally
             {
