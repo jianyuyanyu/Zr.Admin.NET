@@ -6,7 +6,8 @@ namespace ZR.Mall.TaskScheduler
     /// <summary>
     /// 商城定时任务：关闭超时未支付的待付款订单并回补库存。
     /// 由系统任务调度触发（sys_tasks：AssemblyName=ZR.Mall，ClassName=Job_ClosePendingOrder，默认每5分钟）。
-    /// 商城数据固定走 MallDb，与租户无关，任务 TenantId 设为主库即可单次执行（OMSOrderService 内部已固定连接）。
+    /// SaaS 下经 Job_Dispatcher 按租户展开（TenantId="*"），在当前租户库关单；
+    /// 非 SaaS 仍靠订单实体 [Tenant("MallDb")] 路由到商城库。
     /// </summary>
     public class Job_ClosePendingOrder : IJob
     {

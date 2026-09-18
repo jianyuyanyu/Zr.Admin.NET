@@ -11,8 +11,7 @@ namespace ZR.ServiceCore.Middleware
 {
     /// <summary>
     /// 多租户请求解析与一致性校验中间件。
-    /// 在请求早期按访问域名（子域名/自定义域名）解析租户，使匿名（商城游客）与已登录请求
-    /// 都能定位到对应租户库。已登录请求按域名识别，但与 token 租户不一致时不拦截（仅识别）。
+    /// 匿名请求按访问域名（子域名/自定义域名）定位租户库；已登录请求若域名租户与 token 租户不一致则拒绝。
     /// </summary>
     public class TenantResolveMiddleware
     {
@@ -69,10 +68,14 @@ namespace ZR.ServiceCore.Middleware
                 tokenTenantId = loginUser?.TenantId;
             }
 
-            // 域名已解析出租户：以服务端派生的域名为准，不拦截 token 与域名不一致的情况。
-            if (resolvedFromDomain)
+            if (resolvedFromDomain
+                && !string.IsNullOrWhiteSpace(tokenTenantId)
+                && !string.Equals(resolvedTenant, tokenTenantId, StringComparison.OrdinalIgnoreCase))
             {
-                await _next(context);
+                var path = context.Request.Path.Value ?? string.Empty;
+                _logger.LogWarning("域名租户与 token 不一致，请求被拒绝: path={Path}, domainTenant={DomainTenant}, tokenTenant={TokenTenant}", path, resolvedTenant, tokenTenantId);
+                context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                await context.Response.WriteAsJsonAsync(ApiResult.Error(ResultCode.FORBIDDEN, "租户信息不匹配"));
                 return;
             }
 

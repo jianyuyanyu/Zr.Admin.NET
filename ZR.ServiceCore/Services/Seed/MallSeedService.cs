@@ -152,16 +152,30 @@ namespace ZR.ServiceCore.Services
         }
 
         /// <summary>
-        /// 确保商城系统内置定时任务存在（待付款超时自动取消）。幂等，仅首次写入。
-        /// 商城数据固定走 MallDb、与租户无关，TenantId 设为主库即可单次执行（OMSOrderService 内部已固定连接）。
+        /// 确保商城系统内置定时任务存在（待付款超时自动取消）。幂等。
+        /// SaaS 开启时 TenantId="*" 由 Job_Dispatcher 按启用租户展开；未开启时写主库标识单次执行。
         /// </summary>
         public string EnsureTasksSeedData()
         {
             var mainTenantId = App.MainDbConfigId;
             var db = DbScoped.SugarScope.GetConnectionScope(mainTenantId);
+            var targetTenantId = App.IsTenantEnabled() ? "*" : mainTenantId;
 
-            if (db.Queryable<SysTasks>().ClearFilter().Any(x => x.ID == "mall_close_pending"))
-                return "[商城任务] 待付款超时自动取消已存在，跳过";
+            var existingRows = db.Queryable<SysTasks>().ClearFilter()
+                .Where(x => x.ID == "mall_close_pending")
+                .Select(x => x.TenantId)
+                .ToList();
+            if (existingRows.Count > 0)
+            {
+                if (string.Equals(existingRows[0], targetTenantId, StringComparison.OrdinalIgnoreCase))
+                    return "[商城任务] 待付款超时自动取消已存在，跳过";
+
+                db.Updateable<SysTasks>()
+                    .SetColumns(x => x.TenantId == targetTenantId)
+                    .Where(x => x.ID == "mall_close_pending")
+                    .ExecuteCommand();
+                return $"[商城任务] 待付款超时自动取消 TenantId 已更新为 {targetTenantId}";
+            }
 
             db.Insertable(new SysTasks
             {
@@ -175,7 +189,7 @@ namespace ZR.ServiceCore.Services
                 IntervalSecond = 0,
                 IsStart = 1,
                 TaskType = 1,
-                TenantId = mainTenantId,
+                TenantId = targetTenantId,
                 Create_by = "system"
             }).ExecuteCommand();
 

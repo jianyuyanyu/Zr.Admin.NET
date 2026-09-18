@@ -133,7 +133,7 @@ namespace ZR.Tasks.TaskScheduler
 
             if (task.TaskType == 3)
             {
-                ExecuteSqlTask(task);
+                ExecuteSqlTask(task, tenantId);
                 return;
             }
 
@@ -164,7 +164,7 @@ namespace ZR.Tasks.TaskScheduler
             logger.Info("任务【{TaskName}】网络请求执行结果={Result}", info.Name, result);
         }
 
-        private static void ExecuteSqlTask(SysTasks info)
+        private static void ExecuteSqlTask(SysTasks info, string tenantId)
         {
             if (info.SqlText.IsEmpty())
             {
@@ -175,8 +175,14 @@ namespace ZR.Tasks.TaskScheduler
             {
                 throw new CustomException($"任务{info.ID} SQL 未通过安全校验，已拒绝执行：{unsafeReason}");
             }
-            var result = DbScoped.SugarScope.Ado.ExecuteCommand(info.SqlText);
-            logger.Info("任务【{TaskName}】SQL执行结果={Result}", info.Name, result);
+
+            if (string.IsNullOrWhiteSpace(tenantId))
+            {
+                throw new CustomException($"任务{info.ID}执行失败，租户标识为空");
+            }
+
+            var result = DbScoped.SugarScope.GetConnectionScope(tenantId).Ado.ExecuteCommand(info.SqlText);
+            logger.Info("任务【{TaskName}】SQL执行结果={Result}, tenant={TenantId}", info.Name, result, tenantId);
         }
 
         private static async Task ExecuteAssemblyTask(SysTasks info, IJobExecutionContext context, string tenantId)

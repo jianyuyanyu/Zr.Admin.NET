@@ -55,13 +55,23 @@ namespace ZR.Admin.WebApi.Controllers.monitor
         public async Task<IActionResult> Force([FromBody] LockUserDto dto)
         {
             if (dto == null) { return ToResponse(ResultCode.PARAM_ERROR); }
-            
+
+            var target = MessageHub.OnlineClients.Values
+                .FirstOrDefault(u => string.Equals(u.ConnnectionId, dto.ConnnectionId, StringComparison.Ordinal));
+            if (target == null)
+            {
+                return ToResponse(ResultCode.FAIL, "在线连接不存在或已断开");
+            }
+
+            if (App.IsTenantEnabled()
+                && !string.Equals(target.TenantId, App.GetCurrentTenantId(), StringComparison.OrdinalIgnoreCase))
+            {
+                return ToResponse(ResultCode.FORBIDDEN, "无权强退其他租户的在线用户");
+            }
+
             await HubContext.Clients.Client(dto.ConnnectionId)
                 .SendAsync(HubsConstant.ForceUser, new { dto.Reason, dto.Time });
-            
-            //var expirTime = DateTimeHelper.GetUnixTimeSeconds(DateTime.Now.AddMinutes(dto.Time));
-            ////PC 端采用设备 + 用户名的方式进行封锁
-            //CacheService.SetLockUser(dto.ClientId + dto.Name, expirTime, dto.Time);
+
             return SUCCESS(1);
         }
 
@@ -76,9 +86,22 @@ namespace ZR.Admin.WebApi.Controllers.monitor
         {
             if (dto == null) { return ToResponse(ResultCode.PARAM_ERROR); }
 
-            await HubContext.Clients.All.SendAsync(HubsConstant.ForceUser, new { dto.Reason });
+            var query = MessageHub.OnlineClients.Values.AsEnumerable();
+            if (App.IsTenantEnabled())
+            {
+                var currentTenantId = App.GetCurrentTenantId();
+                query = query.Where(u => string.Equals(u.TenantId, currentTenantId, StringComparison.OrdinalIgnoreCase));
+            }
 
-            return SUCCESS(1);
+            var connIds = query.Select(u => u.ConnnectionId).Where(id => !string.IsNullOrWhiteSpace(id)).ToList();
+            if (connIds.Count == 0)
+            {
+                return SUCCESS(0);
+            }
+
+            await HubContext.Clients.Clients(connIds).SendAsync(HubsConstant.ForceUser, new { dto.Reason });
+
+            return SUCCESS(connIds.Count);
         }
     }
 }

@@ -64,7 +64,8 @@ namespace ZR.Repository
         }
 
         /// <summary>
-        /// 解析租户数据库连接：优先使用传入租户ID，其次使用当前请求租户；未启用多租户或租户无效时回退到当前Context。
+        /// 解析租户数据库连接：优先使用传入租户ID，其次使用当前请求租户。
+        /// 未启用多租户时回退当前 Context；SaaS 下租户为空或不在 dbConfigs 中直接失败，禁止回退主库。
         /// </summary>
         protected ISqlSugarClient ResolveTenantDb(string tenantId = null)
         {
@@ -79,7 +80,7 @@ namespace ZR.Repository
 
             if (string.IsNullOrWhiteSpace(targetTenantId))
             {
-                return Context;
+                throw new CustomException("无法解析租户数据库连接：租户标识为空");
             }
 
             var configs = App.OptionsSetting?.DbConfigs;
@@ -88,7 +89,7 @@ namespace ZR.Repository
 
             if (!hasDbConfig)
             {
-                return Context;
+                throw new CustomException($"未找到租户[{targetTenantId}]对应的数据库配置，请先在dbConfigs中配置ConfigId");
             }
 
             return DbScoped.SugarScope.GetConnectionScope(targetTenantId);

@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using SqlSugar;
 using SqlSugar.IOC;
 using ZR.Mall.Service;
 using ZR.ServiceCore.Services;
@@ -21,7 +22,7 @@ namespace ZR.Mall.Controllers
         [ActionPermissionFilter(Permission = "system:dbSync:diff")]
         public IActionResult Diff()
         {
-            var mallDb = DbScoped.SugarScope.GetConnectionScope(App.MallDbConfigId);
+            var mallDb = ResolveMallSyncDb();
             var mallDiff = DbMigrationService.DiffEntities(mallDb, MallTenantInitializer.MallEntityTypes);
 
             var result = new
@@ -51,7 +52,7 @@ namespace ZR.Mall.Controllers
             // 1) 商城库结构同步（建表 + 补列）
             try
             {
-                var mallDb = DbScoped.SugarScope.GetConnectionScope(App.MallDbConfigId);
+                var mallDb = ResolveMallSyncDb();
                 DbMigrationService.EnsureEntitySchemas(mallDb, MallTenantInitializer.MallEntityTypes);
                 var mallDiff = DbMigrationService.DiffEntities(mallDb, MallTenantInitializer.MallEntityTypes);
                 logs.Add($"商城库：同步完成，剩余缺失表 {mallDiff.NewTables.Count} 张，缺失列 {mallDiff.NewColumns.Sum(c => c.Columns.Count)} 个");
@@ -77,6 +78,20 @@ namespace ZR.Mall.Controllers
             }
 
             return SUCCESS(new { Logs = logs, Success = true });
+        }
+
+        /// <summary>
+        /// 非 SaaS 同步共享商城库；SaaS 同步当前请求租户库。
+        /// </summary>
+        private static ISqlSugarClient ResolveMallSyncDb()
+        {
+            var configId = App.IsTenantEnabled() ? App.GetCurrentTenantId() : App.MallDbConfigId;
+            if (string.IsNullOrWhiteSpace(configId))
+            {
+                throw new CustomException("无法解析商城库连接：租户标识为空");
+            }
+
+            return DbScoped.SugarScope.GetConnectionScope(configId);
         }
     }
 }
