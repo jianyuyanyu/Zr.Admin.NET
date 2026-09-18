@@ -141,15 +141,28 @@ namespace ZR.ServiceCore.Services
         /// <returns></returns>
         public string GetdirPath(string storePath = "", bool byTimeStore = true)
         {
-            DateTime date = DateTime.Now;
-            string timeDir = date.ToString("yyyy/MMdd");
+            string timeDir = byTimeStore ? DateTime.Now.ToString("yyyy/MMdd") : string.Empty;
 
             if (!string.IsNullOrEmpty(storePath))
             {
-                timeDir = Path.Combine(storePath, timeDir);
+                timeDir = string.IsNullOrEmpty(timeDir) ? storePath : Path.Combine(storePath, timeDir);
             }
-            Console.WriteLine("文件存储目录" + timeDir);
-            return timeDir.Replace("\\", "/");
+
+            if (App.IsTenantEnabled())
+            {
+                var tenantSeg = SanitizeTenantPathSegment(App.GetCurrentTenantId());
+                timeDir = Path.Combine("tenant", tenantSeg, timeDir);
+            }
+
+            return timeDir.Replace("\\", "/").Trim('/');
+        }
+
+        private static string SanitizeTenantPathSegment(string tenantId)
+        {
+            var raw = string.IsNullOrWhiteSpace(tenantId) ? App.MainDbConfigId : tenantId.Trim();
+            var chars = raw.Select(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' ? c : '_').ToArray();
+            var safe = new string(chars);
+            return string.IsNullOrEmpty(safe) ? "unknown" : safe;
         }
 
         public string HashFileName(string str = null)

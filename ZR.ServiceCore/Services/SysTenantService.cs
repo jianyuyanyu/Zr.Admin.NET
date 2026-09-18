@@ -338,39 +338,10 @@ namespace ZR.ServiceCore.Services
                 AppendStep(result, "create-db", true, "数据库创建/校验成功");
             }
 
-            // 初始化当前租户业务常用表，确保首登可用。
-            db.CodeFirst.InitTables(typeof(SysUser));
-            db.CodeFirst.InitTables(typeof(SysRole));
-            db.CodeFirst.InitTables(typeof(SysDept));
-            db.CodeFirst.InitTables(typeof(SysPost));
-            db.CodeFirst.InitTables(typeof(SysNotice));
-            db.CodeFirst.InitTables(typeof(SysLogininfor));
-            db.CodeFirst.InitTables(typeof(SysOperLog));
-            db.CodeFirst.InitTables(typeof(SysRoleMenu));
-            db.CodeFirst.InitTables(typeof(SysRoleDept));
-            db.CodeFirst.InitTables(typeof(SysUserRole));
-            db.CodeFirst.InitTables(typeof(SysUserPost));
-            db.CodeFirst.InitTables(typeof(SysTenantDictData));
-            db.CodeFirst.InitTables(typeof(UserOnlineLog));
-            db.CodeFirst.InitTables(typeof(SqlDiffLog));
-            db.CodeFirst.InitTables(typeof(SmsCodeLog));
-            db.CodeFirst.InitTables(typeof(Article));
-            db.CodeFirst.InitTables(typeof(ArticleCategory));
-            db.CodeFirst.InitTables(typeof(ArticlePraise));
-            db.CodeFirst.InitTables(typeof(ArticleComment));
-            db.CodeFirst.InitTables(typeof(ArticleTopic));
-            db.CodeFirst.InitTables(typeof(ArticleUserCircles));
-            db.CodeFirst.InitTables(typeof(SocialFans));
-            db.CodeFirst.InitTables(typeof(SocialFansInfo));
-            db.CodeFirst.InitTables(typeof(DailySchedule));
-            db.CodeFirst.InitTables(typeof(ArticleBrowsingLog));
-            
-            foreach (var entityType in DbMigrationService.TenantBusinessEntityTypes)
-            {
-                DbMigrationService.EnsureEntitySchema(db, entityType);
-            }
+            // 初始化当前租户业务常用表（建表 + 存量补列），与启动补齐共用 TenantBusinessEntityTypes。
+            DbMigrationService.EnsureEntitySchemas(db, DbMigrationService.TenantBusinessEntityTypes);
 
-            // 调用各业务模块的租户级表初始化器（如商城、内容等），由模块自己决定需要创建哪些表
+            // 调用各业务模块的租户级表初始化器（如商城、工作流），由模块自己决定需要创建哪些表
             foreach (var initializer in _moduleInitializers)
             {
                 var summary = initializer.InitializeTenant(tenantId);

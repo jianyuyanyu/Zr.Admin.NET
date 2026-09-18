@@ -6,6 +6,7 @@ using ZR.Model.AI;
 using ZR.Model.Content;
 using ZR.Model.Models;
 using ZR.Model.Public;
+using ZR.Model.social;
 using ZR.Model.System;
 using ZR.Model.System.Generate;
 using ZR.Model.System.Model;
@@ -75,10 +76,36 @@ namespace ZR.ServiceCore.SqlSugar
 
         /// <summary>
         /// 租户库业务表（无 IMainDbEntity，SaaS 下由 BaseRepository 路由到当前租户库）。
-        /// 新建租户与启动补齐共用此清单；不含商城/工作流（由各自 ITenantModuleInitializer 建）。
+        /// 新建租户 InitializeTenant 与启动 EnsureTenantBusinessTables 共用此清单（建表+补列）。
+        /// 不含商城/工作流（由各自 ITenantModuleInitializer 建）。
         /// </summary>
         public static readonly Type[] TenantBusinessEntityTypes =
         {
+            typeof(SysUser),
+            typeof(SysRole),
+            typeof(SysDept),
+            typeof(SysPost),
+            typeof(SysNotice),
+            typeof(SysLogininfor),
+            typeof(SysOperLog),
+            typeof(SysRoleMenu),
+            typeof(SysRoleDept),
+            typeof(SysUserRole),
+            typeof(SysUserPost),
+            typeof(SysTenantDictData),
+            typeof(UserOnlineLog),
+            typeof(SqlDiffLog),
+            typeof(SmsCodeLog),
+            typeof(Article),
+            typeof(ArticleCategory),
+            typeof(ArticlePraise),
+            typeof(ArticleComment),
+            typeof(ArticleTopic),
+            typeof(ArticleUserCircles),
+            typeof(SocialFans),
+            typeof(SocialFansInfo),
+            typeof(DailySchedule),
+            typeof(ArticleBrowsingLog),
             typeof(AiChatSession),
             typeof(AiChatMessage)
         };

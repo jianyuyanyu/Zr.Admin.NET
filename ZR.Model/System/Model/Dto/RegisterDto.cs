@@ -29,5 +29,9 @@
         /// </summary>
         public string Photo { get; set; }
         public string UserIP { get; set; }
+        /// <summary>
+        /// 租户id（SaaS 开启时必填，写入对应租户库）
+        /// </summary>
+        public string TenantId { get; set; }
     }
 }

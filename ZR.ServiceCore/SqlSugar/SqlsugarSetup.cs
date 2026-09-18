@@ -4,10 +4,9 @@ using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.DependencyInjection;
 using SqlSugar.IOC;
 using ZR.Common;
-using ZR.Model;
+using ZR.Model.AI;
 using ZR.Model.Models;
 using ZR.Model.System;
-using ZR.Model.System.Model;
 using ZR.Repository;
 
 namespace ZR.ServiceCore.SqlSugar
@@ -116,8 +115,9 @@ namespace ZR.ServiceCore.SqlSugar
                 string sql = $"【错误SQL,db={configId}】{UtilMethods.GetSqlString(config.DbType, ex.Sql, (SugarParameter[])ex.Parametres)}\r\n";
                 logger.Error(ex, $"{sql}\r\n{ex.Message}\r\n{ex.StackTrace}");
             };
-            db.GetConnectionScope(configId).Aop.DataExecuting = (oldValue, entiyInfo) =>
+            db.GetConnectionScope(configId).Aop.DataExecuting = (oldValue, entityInfo) =>
             {
+                WarnMissingTenantIdOnInsert(oldValue, entityInfo);
             };
             //差异日志功能
             db.GetConnectionScope(configId).Aop.OnDiffLogEvent = it =>
@@ -245,6 +245,26 @@ namespace ZR.ServiceCore.SqlSugar
                     logger.Warn(logInfo);
                 }
             };
+        }
+
+        /// <summary>
+        /// 主库共享表 INSERT 未带 TenantId 时只打警告，不自动补齐。
+        /// 自动填会掩盖调用方漏赋值；平台表与 AiAccessPolicy（空字符串表示全局策略）不检查。
+        /// </summary>
+        private static void WarnMissingTenantIdOnInsert(object oldValue, DataFilterModel entityInfo)
+        {
+            if (!App.IsTenantEnabled()) return;
+            if (entityInfo.OperationType != DataFilterType.InsertByObject) return;
+            if (!string.Equals(entityInfo.PropertyName, "TenantId", StringComparison.Ordinal)) return;
+            if (oldValue is string existing && !string.IsNullOrWhiteSpace(existing)) return;
+
+            var entityType = entityInfo.EntityValue?.GetType();
+            if (entityType == null) return;
+            if (entityType.Name == nameof(AiAccessPolicy)) return;
+            if (Array.IndexOf(TenantFilter.FilteredEntityTypes, entityType) < 0) return;
+
+            logger.Warn("主库共享表 INSERT 未设置 TenantId: entity={Entity}, currentTenant={TenantId}",
+                entityType.Name, App.GetCurrentTenantId());
         }
 
         private static object GetParsValue(SugarParameter x)
