@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using SqlSugar.IOC;
 using ZR.Mall.Service;
 using ZR.ServiceCore.Services;
+using ZR.ServiceCore.SqlSugar;
 
 namespace ZR.Mall.Controllers
 {
@@ -21,7 +22,7 @@ namespace ZR.Mall.Controllers
         public IActionResult Diff()
         {
             var mallDb = DbScoped.SugarScope.GetConnectionScope(App.MallDbConfigId);
-            var mallDiff = MallTenantInitializer.ComputeMallDiff(mallDb);
+            var mallDiff = DbMigrationService.DiffEntities(mallDb, MallTenantInitializer.MallEntityTypes);
 
             var result = new
             {
@@ -51,11 +52,8 @@ namespace ZR.Mall.Controllers
             try
             {
                 var mallDb = DbScoped.SugarScope.GetConnectionScope(App.MallDbConfigId);
-                foreach (var entityType in MallTenantInitializer.MallEntityTypes)
-                {
-                    MallTenantInitializer.EnsureEntitySchema(mallDb, entityType);
-                }
-                var mallDiff = MallTenantInitializer.ComputeMallDiff(mallDb);
+                DbMigrationService.EnsureEntitySchemas(mallDb, MallTenantInitializer.MallEntityTypes);
+                var mallDiff = DbMigrationService.DiffEntities(mallDb, MallTenantInitializer.MallEntityTypes);
                 logs.Add($"商城库：同步完成，剩余缺失表 {mallDiff.NewTables.Count} 张，缺失列 {mallDiff.NewColumns.Sum(c => c.Columns.Count)} 个");
             }
             catch (Exception ex)

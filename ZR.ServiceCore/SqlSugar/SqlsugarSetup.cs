@@ -55,14 +55,10 @@ namespace ZR.ServiceCore.SqlSugar
 
                     var conn = db.GetConnectionScope(iocConfig.ConfigId);
 
-                    // 租户隔离（主库共享实体，TenantFilter）：仅主库连接且 SaaS 模式下注册
+                    // 租户隔离（主库共享实体）：仅主库连接且 SaaS 模式下注册，清单以 TenantFilter.Apply 为准
                     if (iocConfig.ConfigId == App.MainDbConfigId && App.IsTenantEnabled())
                     {
-                        conn.QueryFilter.AddTableFilter<SysUserMsg>(TenantFilter.SysUserMsgTenantFilter());
-                        conn.QueryFilter.AddTableFilter<SysFile>(TenantFilter.SysFileTenantFilter());
-                        conn.QueryFilter.AddTableFilter<SysFileGroup>(TenantFilter.SysFileGroupTenantFilter());
-                        conn.QueryFilter.AddTableFilter<SysTasks>(TenantFilter.SysTasksTenantFilter());
-                        conn.QueryFilter.AddTableFilter<SysTasksLog>(TenantFilter.SysTasksLogTenantFilter());
+                        TenantFilter.Apply(conn);
                     }
                 });
             });

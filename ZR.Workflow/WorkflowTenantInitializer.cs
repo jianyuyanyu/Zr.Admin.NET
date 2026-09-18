@@ -1,6 +1,7 @@
 using SqlSugar.IOC;
 using ZR.ServiceCore.Services;
 using ZR.ServiceCore.SqlSugar;
+using ZR.Workflow.Model;
 
 namespace ZR.Workflow
 {
@@ -11,6 +12,20 @@ namespace ZR.Workflow
 	public class WorkflowTenantInitializer : ITenantModuleInitializer
 	{
 		public string ModuleName => "Workflow";
+
+		private static readonly Type[] WorkflowEntityTypes =
+		{
+			typeof(WfFlowDefinition),
+			typeof(WfFlowInstance),
+			typeof(WfFlowNode),
+			typeof(WfFlowTask),
+			typeof(WfFlowRecord),
+			typeof(WfFlowComment),
+			typeof(WfFormTemplate),
+			typeof(WfNodeLink),
+			typeof(WfWebhook),
+			typeof(WfWebhookDelivery),
+		};
 
 		public string InitializeTenant(string tenantId)
 		{
@@ -41,18 +56,8 @@ namespace ZR.Workflow
 
 		private static void InitCore(ISqlSugarClient db)
 		{
-			// 使用 DbMigrationService.EnsureEntitySchema：表不存在则建表，已存在则补齐缺失列
-			// （CodeFirst.InitTables 不会给已存在的表加列）。幂等，不删列/不改类型。
-			DbMigrationService.EnsureEntitySchema(db, typeof(WfFlowDefinition));
-			DbMigrationService.EnsureEntitySchema(db, typeof(WfFlowInstance));
-			DbMigrationService.EnsureEntitySchema(db, typeof(WfFlowNode));
-			DbMigrationService.EnsureEntitySchema(db, typeof(WfFlowTask));
-			DbMigrationService.EnsureEntitySchema(db, typeof(WfFlowRecord));
-			DbMigrationService.EnsureEntitySchema(db, typeof(WfFlowComment));
-			DbMigrationService.EnsureEntitySchema(db, typeof(WfFormTemplate));
-			DbMigrationService.EnsureEntitySchema(db, typeof(WfNodeLink));
-			DbMigrationService.EnsureEntitySchema(db, typeof(WfWebhook));
-			DbMigrationService.EnsureEntitySchema(db, typeof(WfWebhookDelivery));
+			// 表不存在则建表，已存在则补齐缺失列（CodeFirst.InitTables 不会给已有表加列）。幂等，不删列/不改类型。
+			DbMigrationService.EnsureEntitySchemas(db, WorkflowEntityTypes);
 			Log.WriteLine(ConsoleColor.Green, "==== 工作流业务表初始化完成 ====");
 		}
 	}

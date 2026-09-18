@@ -474,7 +474,8 @@ namespace ZR.ServiceCore.AI.Governance
         {
             try
             {
-                var query = Context.Queryable<AiCallLog>()
+                // 全局额度要跨租户汇总，必须清掉 AiCallLog 的租户 QueryFilter。
+                var query = Context.Queryable<AiCallLog>().ClearFilter()
                     .Where(x => x.CreateTime >= begin && x.Status != "rejected");
                 if (scopeKey.StartsWith("tenant:", StringComparison.OrdinalIgnoreCase))
                 {

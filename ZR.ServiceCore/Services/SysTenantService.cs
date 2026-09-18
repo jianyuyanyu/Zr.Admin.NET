@@ -363,6 +363,8 @@ namespace ZR.ServiceCore.Services
             db.CodeFirst.InitTables(typeof(SocialFans));
             db.CodeFirst.InitTables(typeof(SocialFansInfo));
             db.CodeFirst.InitTables(typeof(DailySchedule));
+            db.CodeFirst.InitTables(typeof(ArticleBrowsingLog));
+            
             foreach (var entityType in DbMigrationService.TenantBusinessEntityTypes)
             {
                 DbMigrationService.EnsureEntitySchema(db, entityType);

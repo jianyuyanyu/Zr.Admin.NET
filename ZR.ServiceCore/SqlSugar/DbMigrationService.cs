@@ -80,8 +80,7 @@ namespace ZR.ServiceCore.SqlSugar
         public static readonly Type[] TenantBusinessEntityTypes =
         {
             typeof(AiChatSession),
-            typeof(AiChatMessage),
-            typeof(ArticleBrowsingLog),
+            typeof(AiChatMessage)
         };
 
         /// <summary>
@@ -131,11 +130,11 @@ namespace ZR.ServiceCore.SqlSugar
         }
 
         /// <summary>
-        /// 获取当前数据库中的所有表和列快照，用于迁移前后对比
+        /// 系统注册表 + 配置 AdditionalTypes - [SkipMigration]。
         /// </summary>
-        public static DbSchemaSnapshot GetDbSchema(SqlSugarScope db)
+        private static List<Type> ResolveSystemEntities(out List<string> skipped)
         {
-            return GetDbSchemaForConnection(db);
+            return ResolveEntityTypes(SystemEntityTypes, App.OptionsSetting.DbMigration?.AdditionalTypes, out skipped);
         }
 
         /// <summary>
@@ -155,7 +154,14 @@ namespace ZR.ServiceCore.SqlSugar
                         var columns = db.DbMaintenance.GetColumnInfosByTableName(table.Name, false);
                         tableInfo.Columns = columns.Select(c => c.DbColumnName.ToLowerInvariant()).ToHashSet();
                     }
-                    catch { /* 表可能被删除，跳过 */ }
+                    catch (Exception ex)
+                    {
+                        // 列信息不可用时把该表整体排除出快照：若保留空的列集合，下游（ComputeEntityVsDbDiff /
+                        // ComputeDiff）会把该表判定为"零列"，把一次读取故障放大成一整屏假的"新增列"。
+                        // 排除后下游最多把它当作"表不存在"给出一条可解释的提示，代价小得多。
+                        Log.WriteLine(ConsoleColor.Yellow, $"[DbMigration] 读取表 {table.Name} 的列信息失败，已跳过该表: {ex.Message}");
+                        continue;
+                    }
                     snapshot.Tables[tableInfo.Name] = tableInfo;
                 }
             }
@@ -180,7 +186,7 @@ namespace ZR.ServiceCore.SqlSugar
             EnsureMigrationHistoryTable(db);
 
             // 2) 解析实体列表（系统注册表 + 配置文件扩展 - [SkipMigration] 排除）
-            var entities = ResolveEntityTypes(SystemEntityTypes, additionalTypes, out var skipped);
+            var entities = ResolveSystemEntities(out var skipped);
 
             Log.WriteLine(ConsoleColor.Cyan, $"[DbMigration] 注册实体 {SystemEntityTypes.Length} 个，实际迁移 {entities.Count} 个");
             if (additionalTypes is { Length: > 0 })
@@ -193,7 +199,7 @@ namespace ZR.ServiceCore.SqlSugar
             }
 
             // 3) 迁移前快照
-            var beforeSchema = GetDbSchema(db);
+            var beforeSchema = GetDbSchemaForConnection(db);
 
             // 4) ReportOnly 模式：复用 Diff 逻辑，仅对比实体模型与数据库实际结构，不执行 DDL
             if (reportOnly)
@@ -212,21 +218,11 @@ namespace ZR.ServiceCore.SqlSugar
             // 建库（如不存在）
             db.DbMaintenance.CreateDatabase();
 
-            foreach (var entityType in entities)
-            {
-                try
-                {
-                    // CodeFirst.InitTables 对已存在的表不会 ALTER 加列，故用 EnsureEntitySchema
-                    // 同时处理"建新表"与"已有表补缺失列"两种场景（幂等，不删列/不改类型）。
-                    EnsureEntitySchema(db, entityType);
-                }
-                catch (Exception ex)
-                {
-                    migrationErrors.Add($"{entityType.Name}: {ex.Message}");
-                }
-            }
-
-            ValidateAiGovernanceSchema(db, migrationErrors);
+            // CodeFirst.InitTables 对已存在的表不会 ALTER 加列，故用 EnsureEntitySchema
+            // 同时处理"建新表"与"已有表补缺失列"两种场景（幂等，不删列/不改类型）。
+            // 单列补列失败不会抛出，故用回调把它一并汇入 migrationErrors，
+            // 否则这类失败只在控制台留一行黄字，报告/迁移历史/前端同步日志里都看不到。
+            EnsureEntitySchemas(db, entities, msg => migrationErrors.Add(msg));
 
             report.Success = migrationErrors.Count == 0;
             if (migrationErrors.Count > 0)
@@ -235,7 +231,7 @@ namespace ZR.ServiceCore.SqlSugar
             }
 
             // 6) 迁移后快照 & 计算差异
-            var afterSchema = GetDbSchema(db);
+            var afterSchema = GetDbSchemaForConnection(db);
             ComputeDiff(beforeSchema, afterSchema, report);
 
             // 7) 记录迁移历史
@@ -247,27 +243,25 @@ namespace ZR.ServiceCore.SqlSugar
             return report;
         }
 
-        private static void ValidateAiGovernanceSchema(ISqlSugarClient db, List<string> migrationErrors)
+        /// <summary>
+        /// 批量确保实体表结构。单个实体失败不中断后续实体。
+        /// <paramref name="onError"/> 收到的是 "实体名: 明细"；不传则实体级异常只打黄字日志。
+        /// </summary>
+        public static void EnsureEntitySchemas(ISqlSugarClient db, IEnumerable<Type> types, Action<string> onError = null)
         {
-            var required = new Dictionary<string, string[]>
+            foreach (var entityType in types)
             {
-                ["ai_access_policy"] = ["Id", "ScopeType", "TenantId", "SubjectId", "Scene"],
-                ["ai_model_price"] = ["Id", "Provider", "Model", "InputPricePerMillion", "OutputPricePerMillion"],
-                ["ai_call_log"] = ["TenantId", "RequestId", "Success", "Status", "DurationMs", "EstimatedAmount"]
-            };
-            foreach (var (table, columns) in required)
-            {
-                if (!db.DbMaintenance.IsAnyTable(table, false))
+                try
                 {
-                    migrationErrors.Add($"AI governance schema: 缺少表 {table}");
-                    continue;
+                    EnsureEntitySchema(db, entityType, msg => onError?.Invoke($"{entityType.Name}: {msg}"));
                 }
-                var actual = db.DbMaintenance.GetColumnInfosByTableName(table, false)
-                    .Select(x => x.DbColumnName)
-                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                foreach (var column in columns.Where(x => !actual.Contains(x)))
+                catch (Exception ex)
                 {
-                    migrationErrors.Add($"AI governance schema: 缺少列 {table}.{column}");
+                    var detail = $"{entityType.Name}: {ex.Message}";
+                    if (onError != null)
+                        onError(detail);
+                    else
+                        Log.WriteLine(ConsoleColor.Yellow, $"[DbMigration] {detail}");
                 }
             }
         }
@@ -277,8 +271,10 @@ namespace ZR.ServiceCore.SqlSugar
         /// 幂等 —— 不会删除列，也不会修改已有列的类型/长度（避免破坏存量数据）。
         /// 兼容 SQL Server / MySQL：列类型优先取 SqlSugar 按当前 DbType 推导的权威类型，
         /// 兜底按 .NET 属性类型映射。NOT NULL 判定与 SqlsugarSetup.EntityService 约定一致。
+        /// <paramref name="onColumnError"/> 非空时，单列补列失败会额外回调上报（用于汇入迁移报告）；
+        /// 不传则行为与历史一致：只打印告警、不中断其他表/列。
         /// </summary>
-        public static void EnsureEntitySchema(ISqlSugarClient db, Type entityType)
+        public static void EnsureEntitySchema(ISqlSugarClient db, Type entityType, Action<string> onColumnError = null)
         {
             var entityInfo = db.EntityMaintenance.GetEntityInfo(entityType);
             var tableName = entityInfo.DbTableName;
@@ -308,14 +304,9 @@ namespace ZR.ServiceCore.SqlSugar
                 {
                     // SqlSugar 对可空列无 DefaultValue 特性时会填充字符串 "NULL"，
                     // 直接传给 AddColumn 会生成非法 SQL（"... DEFAULT NULL"），归一为空以跳过 DEFAULT 子句。
-                    var defaultValue = col.DefaultValue;
-                    if (string.IsNullOrWhiteSpace(defaultValue)
-                        || defaultValue.Trim().Equals("NULL", StringComparison.OrdinalIgnoreCase))
-                    {
-                        defaultValue = null;
-                    }
+                    var defaultValue = NormalizeDefaultValue(col.DefaultValue);
 
-                    db.DbMaintenance.AddColumn(tableName, new DbColumnInfo
+                    var added = db.DbMaintenance.AddColumn(tableName, new DbColumnInfo
                     {
                         DbColumnName = col.DbColumnName,
                         DataType = ResolveColumnDataType(db, col, prop),
@@ -323,13 +314,25 @@ namespace ZR.ServiceCore.SqlSugar
                         DefaultValue = defaultValue
                     });
 
-                    Log.WriteLine(ConsoleColor.Green, $"[DbMigration] 表 {tableName} 已补列 {col.DbColumnName} {(isNotNull ? "NOT NULL" : "NULL")}");
+                    if (added)
+                    {
+                        Log.WriteLine(ConsoleColor.Green, $"[DbMigration] 表 {tableName} 已补列 {col.DbColumnName} {(isNotNull ? "NOT NULL" : "NULL")}");
+                    }
+                    else
+                    {
+                        // 未抛异常但返回未生效：同样要让调用方可见，避免静默留下一张缺列的表
+                        var detail = $"表 {tableName} 补列 {col.DbColumnName} 未生效（AddColumn 返回 false）";
+                        Log.WriteLine(ConsoleColor.Yellow, $"[DbMigration] {detail}");
+                        onColumnError?.Invoke(detail);
+                    }
                 }
                 catch (Exception ex)
                 {
                     // 单个列补列失败（如 NOT NULL 且无默认值、存量数据冲突）不中断其他表/列，
-                    // 打印提示交由人工处理，保证迁移整体可用。
-                    Log.WriteLine(ConsoleColor.Yellow, $"[DbMigration] 表 {tableName} 补列 {col.DbColumnName} 失败: {ex.Message}");
+                    // 打印提示交由人工处理，保证迁移整体可用；同时回调上报，使其进入迁移报告与历史。
+                    var detail = $"表 {tableName} 补列 {col.DbColumnName} 失败: {ex.Message}";
+                    Log.WriteLine(ConsoleColor.Yellow, $"[DbMigration] {detail}");
+                    onColumnError?.Invoke(detail);
                 }
             }
         }
@@ -399,13 +402,18 @@ namespace ZR.ServiceCore.SqlSugar
         /// </summary>
         public static MigrationReport Diff(SqlSugarScope db)
         {
-            var report = new MigrationReport();
-            var options = App.OptionsSetting;
-            var additionalTypes = options.DbMigration?.AdditionalTypes;
+            return DiffEntities(db, ResolveSystemEntities(out _));
+        }
 
-            var entities = ResolveEntityTypes(SystemEntityTypes, additionalTypes, out _);
-            var dbSchema = GetDbSchema(db);
-            ComputeEntityVsDbDiff(db, entities, dbSchema, report);
+        /// <summary>
+        /// 将指定实体模型与数据库实际结构对比（不执行 DDL），供主库/商城等差异预览。
+        /// 表名、列名一律取自 SqlSugar 的权威映射（GetEntityInfo）。
+        /// </summary>
+        public static MigrationReport DiffEntities(ISqlSugarClient db, IReadOnlyList<Type> entityTypes)
+        {
+            var report = new MigrationReport();
+            var dbSchema = GetDbSchemaForConnection(db);
+            ComputeEntityVsDbDiff(db, entityTypes, dbSchema, report);
             report.Success = true;
             return report;
         }
@@ -418,8 +426,7 @@ namespace ZR.ServiceCore.SqlSugar
         public static void MigrateTenantColumns()
         {
             var mainDb = DbScoped.SugarScope.GetConnectionScope(App.MainDbConfigId);
-            var additionalTypes = App.OptionsSetting.DbMigration?.AdditionalTypes;
-            var entities = ResolveEntityTypes(SystemEntityTypes, additionalTypes, out _);
+            var entities = ResolveSystemEntities(out _);
 
             var addedColumns = new List<string>();
             foreach (var tableName in entities
@@ -460,10 +467,7 @@ namespace ZR.ServiceCore.SqlSugar
                 try
                 {
                     var db = DbScoped.SugarScope.GetConnectionScope(cfg.ConfigId);
-                    foreach (var entityType in TenantBusinessEntityTypes)
-                    {
-                        EnsureEntitySchema(db, entityType);
-                    }
+                    EnsureEntitySchemas(db, TenantBusinessEntityTypes);
                 }
                 catch (Exception ex)
                 {
@@ -504,25 +508,16 @@ namespace ZR.ServiceCore.SqlSugar
 
         private static void SaveTenantColumnHistory(ISqlSugarClient db, List<string> tables)
         {
-            try
+            TryInsertHistory(db, new DbMigrationHistory
             {
-                if (!db.DbMaintenance.IsAnyTable("__db_migration_history", false)) return;
-
-                db.Insertable(new DbMigrationHistory
-                {
-                    BatchId = $"{DateTime.Now:yyyyMMddHHmmss}_tenantcol",
-                    Summary = $"存量库补 TenantId 列 {tables.Count} 张表",
-                    Details = System.Text.Json.JsonSerializer.Serialize(new { TenantIdColumnAdded = tables }),
-                    AppliedAt = DateTime.Now,
-                    NewTables = 0,
-                    NewColumns = tables.Count,
-                    Success = true
-                }).ExecuteCommand();
-            }
-            catch (Exception ex)
-            {
-                Log.WriteLine(ConsoleColor.Yellow, $"[DbMigration] 记录 TenantId 补列历史失败: {ex.Message}");
-            }
+                BatchId = $"{DateTime.Now:yyyyMMddHHmmss}_tenantcol",
+                Summary = $"存量库补 TenantId 列 {tables.Count} 张表",
+                Details = System.Text.Json.JsonSerializer.Serialize(new { TenantIdColumnAdded = tables }),
+                AppliedAt = DateTime.Now,
+                NewTables = 0,
+                NewColumns = tables.Count,
+                Success = true
+            }, requireTable: true, failMessage: "记录 TenantId 补列历史失败");
         }
 
         /// <summary>
@@ -586,12 +581,12 @@ namespace ZR.ServiceCore.SqlSugar
         /// 列名一律取自 SqlSugar 的权威映射（GetEntityInfo），避免手写 ToSnakeCase 与
         /// 实际建表列名（属性原名）不一致导致误报大量"新增列"。
         /// </summary>
-        private static void ComputeEntityVsDbDiff(ISqlSugarClient db, List<Type> entityTypes, DbSchemaSnapshot dbSchema, MigrationReport report)
+        private static void ComputeEntityVsDbDiff(ISqlSugarClient db, IEnumerable<Type> entityTypes, DbSchemaSnapshot dbSchema, MigrationReport report)
         {
             foreach (var entityType in entityTypes)
             {
-                var tableAttr = entityType.GetCustomAttribute<SugarTable>();
-                var tableName = tableAttr?.TableName ?? entityType.Name;
+                var entityInfo = db.EntityMaintenance.GetEntityInfo(entityType);
+                var tableName = entityInfo.DbTableName;
                 var normalizedName = tableName.ToLowerInvariant();
 
                 if (!dbSchema.Tables.TryGetValue(normalizedName, out var existingTable))
@@ -600,7 +595,6 @@ namespace ZR.ServiceCore.SqlSugar
                     continue;
                 }
 
-                var entityInfo = db.EntityMaintenance.GetEntityInfo(entityType);
                 foreach (var col in entityInfo.Columns)
                 {
                     if (col.IsIgnore) continue;
@@ -621,38 +615,54 @@ namespace ZR.ServiceCore.SqlSugar
 
         private static void SaveMigrationHistory(SqlSugarScope db, string batchId, MigrationReport report)
         {
+            var totalNewCols = report.NewColumns.Sum(c => c.Columns.Count);
+            var summary = report.HasChanges
+                ? $"新增表 {report.NewTables.Count} 张，新增列 {totalNewCols} 个"
+                : "无变更";
+            if (report.HasFailures)
+                summary += $"，失败 {report.FailedEntities.Count} 个实体";
+
+            var details = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                report.NewTables,
+                NewColumns = report.NewColumns.Select(c => new { c.TableName, c.Columns }).ToList(),
+                report.FailedEntities
+            });
+
+            TryInsertHistory(db, new DbMigrationHistory
+            {
+                BatchId = batchId,
+                Summary = summary,
+                Details = details,
+                AppliedAt = DateTime.Now,
+                NewTables = report.NewTables.Count,
+                NewColumns = totalNewCols,
+                Success = report.Success,
+                Error = Truncate(report.Error, 3900)
+            }, requireTable: false, failMessage: "记录迁移历史失败");
+        }
+
+        private static void TryInsertHistory(ISqlSugarClient db, DbMigrationHistory history, bool requireTable, string failMessage)
+        {
             try
             {
-                var totalNewCols = report.NewColumns.Sum(c => c.Columns.Count);
-                var summary = report.HasChanges
-                    ? $"新增表 {report.NewTables.Count} 张，新增列 {totalNewCols} 个"
-                    : "无变更";
-                if (report.HasFailures)
-                    summary += $"，失败 {report.FailedEntities.Count} 个实体";
-
-                var details = System.Text.Json.JsonSerializer.Serialize(new
-                {
-                    report.NewTables,
-                    NewColumns = report.NewColumns.Select(c => new { c.TableName, c.Columns }).ToList(),
-                    report.FailedEntities
-                });
-
-                db.Insertable(new DbMigrationHistory
-                {
-                    BatchId = batchId,
-                    Summary = summary,
-                    Details = details,
-                    AppliedAt = DateTime.Now,
-                    NewTables = report.NewTables.Count,
-                    NewColumns = totalNewCols,
-                    Success = report.Success,
-                    Error = Truncate(report.Error, 3900)
-                }).ExecuteCommand();
+                if (requireTable && !db.DbMaintenance.IsAnyTable("__db_migration_history", false)) return;
+                db.Insertable(history).ExecuteCommand();
             }
             catch (Exception ex)
             {
-                Log.WriteLine(ConsoleColor.Yellow, $"[DbMigration] 记录迁移历史失败: {ex.Message}");
+                Log.WriteLine(ConsoleColor.Yellow, $"[DbMigration] {failMessage}: {ex.Message}");
             }
+        }
+
+        private static string NormalizeDefaultValue(string defaultValue)
+        {
+            if (string.IsNullOrWhiteSpace(defaultValue)
+                || defaultValue.Trim().Equals("NULL", StringComparison.OrdinalIgnoreCase))
+            {
+                return null;
+            }
+            return defaultValue;
         }
 
         private static void PrintReport(MigrationReport report)
@@ -660,8 +670,10 @@ namespace ZR.ServiceCore.SqlSugar
             Log.WriteLine(ConsoleColor.White, "");
             Log.WriteLine(ConsoleColor.Cyan, "========== 数据库迁移报告 ==========");
 
-            // 全盘致命错误
-            if (!report.Success)
+            // 全局致命错误：report.Error 仅在整体流程无法继续时赋值，实体级部分失败不会赋值。
+            // 这里刻意不用 !report.Success 短路 —— Success=false 与"FailedEntities 非空"（部分实体失败）等价，
+            // 那样会把下面的 NewTables / NewColumns / FailedEntities 明细一起吞掉，只剩一行空的"迁移中断"。
+            if (report.Error != null)
             {
                 Log.WriteLine(ConsoleColor.Red, $"迁移中断: {report.Error}");
                 return;

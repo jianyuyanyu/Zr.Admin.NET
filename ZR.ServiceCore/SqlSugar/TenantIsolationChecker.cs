@@ -26,13 +26,19 @@ namespace ZR.ServiceCore.SqlSugar
         /// <summary>
         /// 执行隔离自检，返回已覆盖/候选/可疑三份清单。
         /// 扫描范围为 ZR.Model 程序集（主库共享实体所在程序集）中实现 IMainDbEntity 且带 TenantId 属性的类型。
+        /// 已覆盖清单以 <see cref="TenantFilter.FilteredEntityTypes"/>（Apply 实际注册）为准，
+        /// 并与 TenantFilter 上的 Expression 方法交叉核对，防止只写了方法却未挂 QueryFilter。
         /// </summary>
         public static TenantIsolationCheckResult Check()
         {
-            // 1) TenantFilter 已覆盖实体：反射其静态过滤器方法返回类型 Expression<Func<TEntity, bool>> 提取实体名
-            var coveredNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var coveredNames = new HashSet<string>(
+                TenantFilter.FilteredEntityTypes.Select(t => t.Name),
+                StringComparer.OrdinalIgnoreCase);
+
+            var filterMethodNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var returnType in typeof(TenantFilter)
                          .GetMethods(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)
+                         .Where(m => m.Name != nameof(TenantFilter.Apply))
                          .Select(m => m.ReturnType))
             {
                 // Expression<Func<TEntity, bool>> → 首个泛型参数为 Func<TEntity, bool> → 其首参即实体类型
@@ -40,11 +46,18 @@ namespace ZR.ServiceCore.SqlSugar
                 var funcArg = returnType.GetGenericArguments()[0];
                 if (funcArg.IsGenericType)
                 {
-                    coveredNames.Add(funcArg.GetGenericArguments()[0].Name);
+                    filterMethodNames.Add(funcArg.GetGenericArguments()[0].Name);
                 }
             }
 
-            // 2) 候选实体：ZR.Model 程序集中 IMainDbEntity + TenantId 属性
+            var registrationMismatch = coveredNames
+                .Except(filterMethodNames, StringComparer.OrdinalIgnoreCase)
+                .Concat(filterMethodNames.Except(coveredNames, StringComparer.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            // 候选实体：ZR.Model 程序集中 IMainDbEntity + TenantId 属性
             var modelAssembly = typeof(SysTenant).Assembly;
             var candidates = modelAssembly.GetTypes()
                 .Where(t => t.IsClass && !t.IsAbstract
@@ -53,7 +66,7 @@ namespace ZR.ServiceCore.SqlSugar
                 .Select(t => t.Name)
                 .ToList();
 
-            // 3) 可疑差集：带 TenantId 主库实体但既未注册过滤也不在豁免清单
+            // 可疑差集：带 TenantId 主库实体但既未注册过滤也不在豁免清单
             var suspicious = candidates
                 .Where(name => !coveredNames.Contains(name) && !ExemptTables.Contains(name))
                 .ToList();
@@ -64,7 +77,8 @@ namespace ZR.ServiceCore.SqlSugar
                 ExemptList = ExemptTables.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList(),
                 CandidateList = candidates.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList(),
                 SuspiciousList = suspicious,
-                IsSafe = suspicious.Count == 0
+                RegistrationMismatchList = registrationMismatch,
+                IsSafe = suspicious.Count == 0 && registrationMismatch.Count == 0
             };
         }
     }
@@ -95,7 +109,12 @@ namespace ZR.ServiceCore.SqlSugar
         public List<string> SuspiciousList { get; set; } = new();
 
         /// <summary>
-        /// 可疑清单为空时为 true
+        /// TenantFilter 方法与 FilteredEntityTypes（Apply 注册表）不一致的实体名
+        /// </summary>
+        public List<string> RegistrationMismatchList { get; set; } = new();
+
+        /// <summary>
+        /// 可疑清单与注册不一致清单均为空时为 true
         /// </summary>
         public bool IsSafe { get; set; }
     }
