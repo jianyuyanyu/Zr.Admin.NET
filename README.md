@@ -1,4 +1,4 @@
-<h2 align="center"> ZR.Admin.NET后台管理系统</h2>
+<h2 align="center"> ZR.Admin.NET企业级后台管理系统</h2>
 <h4 align="center">基于.Net8 + vue2.x/vue3.x/uniapp前后端分离的.net快速开发框架</h4>
 
 <!-- <p align="center">
@@ -69,11 +69,12 @@ init-run.bat
 - web 端体验：[http://demo.izhaorui.cn/vue3](http://demo.izhaorui.cn/vue3)
 - Uniapp 版本体验(vue2)：[http://demo.izhaorui.cn/h5](http://demo.izhaorui.cn/h5)
 - Uniapp 版本体验(vue3)：[http://demo.izhaorui.cn/uplus](http://demo.izhaorui.cn/uplus)
+- 移动端工作流体验：[http://demo.izhaorui.cn/wf](http://demo.izhaorui.cn/wf)
 - 账号密码：admin/123456，普通用户 user/123456
 
-| H5                                                                                     |
-| -------------------------------------------------------------------------------------- |
-| ![alt](https://gitee.com/izory/ZrAdminNetCore/raw/master/document/images/qrcodeH5.png) |
+| H5                                                                                     | 工作流 |
+| -------------------------------------------------------------------------------------- |--------|
+| ![alt](https://gitee.com/izory/ZrAdminNetCore/raw/master/document/images/qrcodeH5.png) |![alt](https://gitee.com/izory/ZrAdminNetCore/raw/master/document/images/workflow_demo.png) |
 
 ```
 由于是个人项目，资金有限，体验服务器是低配，请大家爱惜，轻戳，不胜感激！！！
@@ -86,7 +87,7 @@ init-run.bat
 | net8                | [克隆/下载](https://github.com/izhaorui/Zr.Admin.NET)  | [克隆/下载](https://gitee.com/izory/ZrAdminNetCore) |
 | web 前端 vue3(推荐) | [克隆/下载](https://github.com/izhaorui/ZR.Admin.Vue3) | [克隆/下载](https://gitee.com/izory/ZRAdmin-vue)    |
 | 移动端              | [联系作者](http://www.izhaorui.cn/vip/)                | [联系作者](http://www.izhaorui.cn/vip/)             |
-| 工作流版              | [联系作者](http://www.izhaorui.cn/vip/)                | [联系作者](http://www.izhaorui.cn/vip/)             |
+| 工作流版              | [联系作者](http://www.izhaorui.cn/enterprise/)                | [联系作者](http://www.izhaorui.cn/enterprise/)             |
 
 ## 🍁 前端技术
 
@@ -94,7 +95,7 @@ Vue 版前端技术栈 ：基于 vue2.x/vue3.x/uniapp、vuex、vue-router 、vue
 
 ## 🍀 后端技术
 
-- 核心框架：.Net8.0 + Web API + sqlsugar + swagger + signalR + IpRateLimit + Quartz.net + Redis
+- 核心框架：.Net8.0 + Web API + sqlsugar + swagger + signalR + IpRateLimit + Quartz.net + Redis + MiniExcel + AI
 - 定时计划任务：Quartz.Net 组件，支持执行程序集或者 http 网络请求
 - 安全支持：过滤器(数据权限过滤)、Sql 注入、请求伪造
 - 日志管理：NLog、登录日志、操作日志、定时任务日志
@@ -106,7 +107,7 @@ Vue 版前端技术栈 ：基于 vue2.x/vue3.x/uniapp、vuex、vue-router 、vue
 - 多 租 户：内置完整 SaaS 多租户方案（DB-per-tenant 独立数据库 + 套餐菜单授权），详见下方 [SaaS 多租户](#-saas-多租户)
 - 缓存数据：内置内存缓存和 `Redis`
 - signalR：使用 `signalr` 管理用户在线状态
-- 工作流：内置轻量级审批流（Work Flow）模块，覆盖「流程定义 → 发起申请 → 节点审批 → 记录追踪」全链路。
+- 工作流：内置审批流（WorkFlow）模块，覆盖「流程定义 → 发起申请 → 节点审批 → 记录追踪」全链路。
 
 ## 🍖 内置功能
 
@@ -136,7 +137,7 @@ Vue 版前端技术栈 ：基于 vue2.x/vue3.x/uniapp、vuex、vue-router 、vue
 24. 导入导出：支持中文表头导入、字典数据转换成文本导出
 25. 数据大屏：更直观的展示数据
 26. 商城管理：商城功能，包含订单管理、发货、分类、品牌管理、销售统计；（前端还在开发中）
-27. SaaS 多租户：内置完整的多租户 SaaS 体系，支持租户全生命周期管理、套餐授权、用户配额、到期提醒等。
+27. saas多租户：内置完整的多租户 SaaS 体系，支持租户全生命周期管理、套餐授权、用户配额、到期提醒等。
 28. 工作流模块：内置轻量级可视化审批流引擎，支持动态表单、流程设计复制、通过/驳回/撤回/转办/加签等全场景流转、运行数据面板，并提供软删除与防呆校验保障数据安全。
 
 ## 🏢 SaaS 多租户
@@ -158,7 +159,7 @@ Vue 版前端技术栈 ：基于 vue2.x/vue3.x/uniapp、vuex、vue-router 、vue
 
 ## ⚡ 工作流模块
 
-内置轻量级可视化审批流（Work Flow）模块，覆盖「流程定义 → 发起申请 → 节点审批 → 记录追踪」全链路，开箱即用地支撑企业日常审批场景。
+内置可视化审批流（WorkFlow）模块，覆盖「流程定义 → 发起申请 → 节点审批 → 记录追踪」全链路，开箱即用地支撑企业日常审批场景。
 
 <p align="center">
   <img src="https://gitee.com/izory/ZrAdminNetCore/raw/master/document/images/wf6.png" alt="流程设计器" width="720" />
