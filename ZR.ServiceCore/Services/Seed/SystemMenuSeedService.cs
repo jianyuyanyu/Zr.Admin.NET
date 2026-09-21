@@ -6,7 +6,7 @@ namespace ZR.ServiceCore.Services
     /// <summary>
     /// 系统菜单种子：为 data.xlsx 之外的系统级菜单/按钮权限补种（与具体业务模块无关）。
     /// 注意：EnsureAiPermSeedData 只补挂在 data.xlsx 系统页下的 F 按钮；
-    /// EnsureAiUsageMenuSeedData 维护「用量管理」(管理员) +「我的用量」(个人) 两页。
+    /// EnsureAiUsageMenuSeedData 维护「用量管理」(管理员) +「我的用量」(个人) +「AI 办公助手」(独立页) 三页。
     /// </summary>
     internal sealed class SystemMenuSeedService
     {
@@ -24,7 +24,7 @@ namespace ZR.ServiceCore.Services
         };
 
         /// <summary>
-        /// AI 用量两页：管理员全站（用量管理）+ 个人自助（我的用量）。
+        /// AI 应用子页：管理员全站（用量管理）、个人自助（我的用量）、独立 AI 办公助手。
         /// </summary>
         private static readonly SeedPage AiUsageAdminPage = new(
             Name: "用量管理",
@@ -66,11 +66,21 @@ namespace ZR.ServiceCore.Services
             Component: "Ai/AiUsageMine",
             Perms: "ai:usage:mine",
             OrderNum: 3,
-            Buttons:
-            [
-                new SeedButton("AI 办公助手", "ai:chat", OrderNum: 99),
-            ],
+            Buttons: [],
             Icon: "user");
+
+        /// <summary>
+        /// AI 办公助手：独立页面
+        /// </summary>
+        private static readonly SeedPage AiChatPage = new(
+            Name: "AI 办公助手",
+            Path: "aiChat",
+            Component: "Ai/AiChat",
+            RouteName: "AiChat",
+            Perms: "ai:chat",
+            OrderNum: 4,
+            Buttons: [],
+            Icon: "message");
 
         /// <summary>
         /// 确保系统模块 AI 能力按钮权限存在（幂等）。
@@ -100,8 +110,8 @@ namespace ZR.ServiceCore.Services
         }
 
         /// <summary>
-        /// 确保 AI 用量菜单：用量管理（管理员全站）+ 我的用量（个人）。
-        /// 权限：ai:usage:list（管理端）、ai:usage:mine + ai:chat（个人端）。
+        /// 确保 AI 应用菜单：用量管理（管理员全站）、我的用量（个人）、AI 办公助手（独立页）。
+        /// 权限：ai:usage:list（管理端）、ai:usage:mine（个人端）、ai:chat（办公助手页）。
         /// </summary>
         public string EnsureAiUsageMenuSeedData()
         {
@@ -138,6 +148,7 @@ namespace ZR.ServiceCore.Services
                 AiUsageAdminPage,
                 AiGovernancePage,
                 AiUsageMinePage,
+                AiChatPage,
             };
 
             var inserted = 0;
