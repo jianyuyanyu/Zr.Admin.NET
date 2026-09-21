@@ -408,10 +408,22 @@ namespace ZR.Workflow.Service
             using var actorScope = new global::Infrastructure.AI.AiCallActorScope(tenantId, operatorId, operatorName);
             try
             {
-                var inst = await Context.Queryable<WfFlowInstance>()
+                // 后台线程不能复用请求级 Context：调用方（AddRecord）此时通常仍在 RunInTx 事务内、
+                // 请求线程持有同一连接的打开状态，并发使用同一连接会抛
+                // "已有打开的与此 Connection 相关联的 DataReader，必须首先将它关闭"，
+                // 并把外层事务提交一起带崩（表现为 500）。
+                // 与 WfFlowInstanceService.FillAttachmentParsedAsync 保持一致：
+                // 复制一个独立连接的 scope，并按租户路由到对应租户库。
+                var scope = SqlSugar.IOC.DbScoped.SugarScope.CopyNew();
+                ISqlSugarClient db = App.IsTenantEnabled() && !string.IsNullOrWhiteSpace(tenantId)
+                    ? scope.AsTenant().GetConnectionScope(tenantId)
+                    : scope;
+
+                var inst = await db.Queryable<WfFlowInstance>()
                     .Where(i => i.InstanceId == instanceId)
                     .FirstAsync();
-                var formItems = await Context.Queryable<WfFlowDefinition>()
+                if (inst == null) return;
+                var formItems = await db.Queryable<WfFlowDefinition>()
                     .Where(d => d.FlowId == inst.FlowId)
                     .Select(d => d.FormItems)
                     .FirstAsync();
@@ -420,7 +432,7 @@ namespace ZR.Workflow.Service
                 var summary = await _aiService.SummarizeApprovalAsync(string.Empty, nodeName, opinion, formText);
                 if (!string.IsNullOrWhiteSpace(summary?.Summary))
                 {
-                    await Context.Updateable<WfFlowRecord>()
+                    await db.Updateable<WfFlowRecord>()
                         .SetColumns(r => r.Summary == summary.Summary)
                         .Where(r => r.RecordId == recordId)
                         .ExecuteCommandAsync();

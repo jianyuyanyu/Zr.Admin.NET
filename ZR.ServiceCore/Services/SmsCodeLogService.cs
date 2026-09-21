@@ -127,10 +127,18 @@ namespace ZR.ServiceCore.Services
             };
             var model = InsertLog(message);
 
-            // 通知类短信时效不敏感：fire-and-forget 异步发送，失败不影响主业务（如发货）
-            var db = Context;
+            // 通知类短信时效不敏感：fire-and-forget 异步发送，失败不影响主业务（如发货）。
+            // 后台线程不能复用请求级 Context：调用方可能正处于 UseTran 事务中（如批量取消订单），
+            // 同一连接并发执行命令会抛 "已有打开的与此 Connection 相关联的 DataReader，必须首先将它关闭"，
+            // 并把外层事务一起带崩。与 WfFlowInstanceService.FillAttachmentParsedAsync 一致：
+            // 请求上下文内先捕获租户 Id，任务内用 CopyNew() 独立连接并按租户路由。
+            var tenantId = App.IsTenantEnabled() ? App.GetCurrentTenantId() : null;
             _ = System.Threading.Tasks.Task.Run(async () =>
             {
+                var scope = global::SqlSugar.IOC.DbScoped.SugarScope.CopyNew();
+                ISqlSugarClient db = App.IsTenantEnabled() && !string.IsNullOrWhiteSpace(tenantId)
+                    ? scope.AsTenant().GetConnectionScope(tenantId)
+                    : scope;
                 try
                 {
                     var result = await _smsSender.SendAsync(message);
