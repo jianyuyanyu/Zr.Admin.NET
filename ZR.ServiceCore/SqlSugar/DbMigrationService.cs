@@ -111,6 +111,18 @@ namespace ZR.ServiceCore.SqlSugar
         };
 
         /// <summary>
+        /// 启动补 TenantId 列的排除清单。
+        /// 这些实体虽实现 IMainDbEntity 且有 TenantId 属性，但不参与每次启动的存量补列：
+        /// 属可选业务模块的表，结构由 --initdb / 手工同步维护，避免核心启动链路耦合可选模块。
+        /// 仅作用于 <see cref="MigrateTenantColumns"/>，不影响 <see cref="Migrate"/> 全量迁移（仍会建表/补列）。
+        /// </summary>
+        private static readonly HashSet<Type> StartupTenantColumnExcludedTypes = new()
+        {
+            typeof(AiCallLog),
+            typeof(AiAccessPolicy),
+        };
+
+        /// <summary>
         /// 获取本次迁移实际使用的实体类型列表：
         /// 系统注册表 + 配置文件 AdditionalTypes - 被 [SkipMigration] 排除的实体。
         /// </summary>
@@ -448,7 +460,8 @@ namespace ZR.ServiceCore.SqlSugar
         /// <summary>
         /// 多租户存量库补列：对显式注册表中实现 IMainDbEntity 且含 TenantId 属性的实体，
         /// 幂等补加 TenantId 列。所有环境启动时执行（新装库由 CodeFirst 建列，此处只兜底存量库）。
-        /// 实体来源与 Migrate 一致：SystemEntityTypes + 配置 AdditionalTypes - [SkipMigration]。
+        /// 实体来源与 Migrate 一致：SystemEntityTypes + 配置 AdditionalTypes - [SkipMigration]，
+        /// 再减去 StartupTenantColumnExcludedTypes（可选模块表不在启动补列范围内）。
         /// </summary>
         public static void MigrateTenantColumns()
         {
@@ -458,6 +471,7 @@ namespace ZR.ServiceCore.SqlSugar
             var addedColumns = new List<string>();
             foreach (var tableName in entities
                 .Where(t => typeof(IMainDbEntity).IsAssignableFrom(t) && t.GetProperty("TenantId") != null)
+                .Where(t => !StartupTenantColumnExcludedTypes.Contains(t))
                 .Select(t => t.GetCustomAttribute<SugarTable>()?.TableName)
                 .Where(name => name != null))
             {
