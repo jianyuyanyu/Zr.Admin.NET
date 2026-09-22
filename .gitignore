@@ -9,6 +9,7 @@
 .codebuddy
 ZR.Tests.AI
 ai.Development.json
+document/doc
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
