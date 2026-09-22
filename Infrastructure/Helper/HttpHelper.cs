@@ -19,8 +19,12 @@ namespace Infrastructure
         /// "This instance has already started one or more requests" 异常。
         /// 因此：超时由各调用方通过 timeOut 参数生成 CancellationToken 控制，
         /// 请求级 header 写入每次新建的 HttpRequestMessage.Headers，绝不污染共享实例。
+        /// Timeout 设为 Infinite：避免默认 100s 与业务 CTS（如 Ollama 120s）互相抢短，导致“无响应”。
         /// </summary>
-        private static readonly HttpClient SharedClient = new HttpClient();
+        private static readonly HttpClient SharedClient = new HttpClient
+        {
+            Timeout = Timeout.InfiniteTimeSpan
+        };
 
         /// <summary>
         /// 构建并发送请求：超时通过 CancellationToken 控制，请求级 header 仅作用于本次请求。

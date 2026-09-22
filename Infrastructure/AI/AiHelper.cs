@@ -28,7 +28,7 @@ namespace Infrastructure.AI
                 throw new Exception("AI 功能未启用，请在 appsettings.json 配置 AiOptions.Enable");
             }
             var resolved = AiLlmClient.ResolveProvider(options);
-            if (string.IsNullOrWhiteSpace(resolved.ApiKey))
+            if (string.IsNullOrWhiteSpace(resolved.ApiKey) && !AiLlmClient.AllowsEmptyApiKey(resolved.Provider))
             {
                 throw new Exception("AI 功能未配置 ApiKey，请在 appsettings.json 的 AiOptions 或 Providers 中配置");
             }

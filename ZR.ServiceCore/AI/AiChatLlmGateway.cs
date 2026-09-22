@@ -16,6 +16,14 @@ namespace ZR.ServiceCore.AI
         public (string Provider, string BaseUrl, string ChatEndpoint, string Model, string ApiKey) ResolveProvider(AiOptions options)
             => AiLlmClient.ResolveProvider(options);
 
+        /// <summary>解析视觉 provider 配置（转发 AiLlmClient）</summary>
+        public (string Provider, string BaseUrl, string ChatEndpoint, string Model, string ApiKey) ResolveVisionProvider(AiOptions options)
+            => AiLlmClient.ResolveVisionProvider(options);
+
+        /// <summary>多模态看图（转发 AiLlmClient）</summary>
+        public Task<string> ChatWithImagesAsync(AiOptions options, string systemPrompt, string textPrompt, List<string> imageUrls, string scene = null)
+            => AiLlmClient.ChatWithImagesAsync(options, systemPrompt, textPrompt, imageUrls, scene);
+
         /// <summary>非流式 function calling 单轮调用（转发 AiLlmClient）</summary>
         public Task<AiLlmClient.ChatToolResult> ChatWithToolsAsync(AiOptions options, object[] messages, object[] tools, string scene = null)
             => AiLlmClient.ChatWithToolsAsync(options, messages, tools, scene);

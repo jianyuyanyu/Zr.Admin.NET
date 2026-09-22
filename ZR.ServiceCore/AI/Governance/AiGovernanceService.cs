@@ -248,12 +248,14 @@ namespace ZR.ServiceCore.AI.Governance
             }
 
             Add(_options.Provider, _options.Model);
-            Add(_options.VisionProvider, _options.VisionModel);
+            var vision = AiLlmClient.ResolveVisionProvider(_options);
+            Add(vision.Provider, vision.Model);
             if (_options.Providers != null)
             {
                 foreach (var item in _options.Providers)
                 {
                     Add(item?.Provider, item?.Model, item?.Label);
+                    Add(item?.Provider, item?.VisionModel, item?.Label);
                     if (item?.Models == null) continue;
                     foreach (var model in item.Models) Add(item.Provider, model, item.Label);
                 }
@@ -291,14 +293,15 @@ namespace ZR.ServiceCore.AI.Governance
                 BaseUrl = MaskUrl(resolved.BaseUrl),
                 Endpoint = resolved.ChatEndpoint,
                 Model = resolved.Model,
-                ApiKeyConfigured = !string.IsNullOrWhiteSpace(key) && !key.Contains("xxx", StringComparison.OrdinalIgnoreCase),
-                VisionConfigured = !string.IsNullOrWhiteSpace(_options.VisionModel)
+                ApiKeyConfigured = AiLlmClient.AllowsEmptyApiKey(resolved.Provider)
+                    || (!string.IsNullOrWhiteSpace(key) && !key.Contains("xxx", StringComparison.OrdinalIgnoreCase)),
+                VisionConfigured = !string.IsNullOrWhiteSpace(AiLlmClient.ResolveVisionProvider(_options).Model)
             };
             if (!_options.Enable) result.Warnings.Add("AI 总开关未启用");
             if (!Uri.TryCreate(resolved.BaseUrl, UriKind.Absolute, out var uri)
                 || (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp))
                 result.Warnings.Add("Provider BaseUrl 不是有效的 HTTP(S) 地址");
-            else if (uri.Scheme != Uri.UriSchemeHttps)
+            else if (uri.Scheme != Uri.UriSchemeHttps && uri.Host is not "localhost" and not "127.0.0.1" and not "::1")
                 result.Warnings.Add("Provider BaseUrl 未使用 HTTPS");
             if (!result.ApiKeyConfigured) result.Warnings.Add("API Key 缺失或仍为占位值");
             if (string.IsNullOrWhiteSpace(resolved.Model)) result.Warnings.Add("模型名称未配置");

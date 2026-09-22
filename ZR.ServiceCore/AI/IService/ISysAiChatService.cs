@@ -35,7 +35,7 @@ namespace ZR.ServiceCore.AI.IService
         /// 发送一条消息并获取回复。内部可能多次调用 LLM + 执行工具。
         /// SessionId&lt;=0 时自动新建；首轮会依据提问内容自动生成标题。
         /// </summary>
-        Task<SysAiChatResultDto> ChatAsync(long sessionId, long userId, string message);
+        Task<SysAiChatResultDto> ChatAsync(long sessionId, long userId, string message, IReadOnlyList<string> imageUrls = null);
 
         /// <summary>
         /// 流式对话（SSE 事件流）：编排语义与 ChatAsync 完全一致，
@@ -43,6 +43,6 @@ namespace ZR.ServiceCore.AI.IService
         /// delta=增量文本、tool=工具执行状态、done=整轮结束(含落库结果)、error=异常终止。
         /// 调用方需逐条序列化输出到 SSE；支持传入取消令牌以在客户端断开时尽快停止流。
         /// </summary>
-        IAsyncEnumerable<SysAiChatStreamDto> StreamChatAsync(long sessionId, long userId, string message, CancellationToken cancellationToken = default);
+        IAsyncEnumerable<SysAiChatStreamDto> StreamChatAsync(long sessionId, long userId, string message, IReadOnlyList<string> imageUrls = null, CancellationToken cancellationToken = default);
     }
 }

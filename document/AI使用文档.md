@@ -56,6 +56,7 @@
 ### 2.4 使用提示
 
 - 对话会按场景自动调用对应工具（如翻译、日程/周报生成、代码生成列推断、日志 AI 分析等），无需手动选择。
+- 支持发图提问（截图 OCR、表格/单据识别）。管理员需在当前供应商配置 `VisionModel`；有图时本轮不调用工具。
 - 删除会话不可恢复，请谨慎操作。
 
 ### 2.5 对话请求流程图（用户输入 → 返回）
@@ -285,3 +286,9 @@ A：全站用量（`aiUsage/summary|users|list`）需要 `ai:usage:list` 权限�
 
 **Q：Provider 探活失败代表什么？**
 A：仅表示探活时刻该 Provider 不可达（网络、ApiKey、额度或模型名问题）。可用 `config/check` 看具体告警项。
+
+**Q：发图提示未配置视觉模型 / HTTP 403？**
+A：当前 Provider 需填写 `VisionModel`。百炼每个模型免费额度独立，额度用尽或开了「仅用免费额度」会 403；可换成仍有余量的模型（如 `qwen3.7-flash`），或充值后用 `qwen3-vl-plus`。
+
+**Q：如何用本地 Ollama？**
+A：`ai.json` 已预置 `ollama` 分项。把顶层 `Provider` 改为 `ollama`，`BaseUrl` 指向本机或局域网 `http://host:11434/v1`，模型名与 `ollama list` 一致；看图另配 `VisionModel`（如 `llava`）。本地可用占位 Key，不必填云厂商密钥。

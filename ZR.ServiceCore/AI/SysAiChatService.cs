@@ -2,6 +2,7 @@ using Infrastructure;
 using Infrastructure.AI;
 using Infrastructure.Attribute;
 using Infrastructure.Model;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.IdentityModel.Tokens;
 using Newtonsoft.Json.Linq;
 using NLog;
@@ -31,6 +32,7 @@ namespace ZR.ServiceCore.AI
         private readonly IReadOnlyList<IAiAssistantToolProvider> _toolProviders;
         private readonly IReadOnlyList<AiToolDef> _providerToolDefs;
         private readonly Dictionary<string, IAiAssistantToolProvider> _toolProviderMap;
+        private readonly IWebHostEnvironment _env;
 
         private static readonly Logger _logger = LogManager.GetCurrentClassLogger();
 
@@ -58,14 +60,16 @@ namespace ZR.ServiceCore.AI
         /// <param name="llm">大模型调用网关（封装静态 AiLlmClient，便于测试替换）</param>
         /// <param name="toolProviders">各模块注册的扩展工具提供者</param>
         /// <param name="permissionService">权限服务（工具清单按用户权限过滤）</param>
+        /// <param name="env">宿主环境（本机上传图片转 data URI 时定位 wwwroot）</param>
         public SysAiChatService(ISysAiService sysAi, IDailyScheduleService scheduleService,
             IAiChatLlmGateway llm, IEnumerable<IAiAssistantToolProvider> toolProviders,
-            ISysPermissionService permissionService)
+            ISysPermissionService permissionService, IWebHostEnvironment env)
         {
             _sysAi = sysAi;
             _scheduleService = scheduleService;
             _llm = llm;
             _permissionService = permissionService;
+            _env = env;
             _toolProviders = (toolProviders ?? []).ToList();
 
             var defs = new List<AiToolDef>();
@@ -208,7 +212,8 @@ namespace ZR.ServiceCore.AI
                 PromptTokens = m.PromptTokens,
                 CompletionTokens = m.CompletionTokens,
                 TotalTokens = m.TotalTokens,
-                Charts = m.Role == "assistant" ? AiChartAssembler.FromDataJson(m.DataJson) : null
+                Charts = m.Role == "assistant" ? AiChartAssembler.FromDataJson(m.DataJson) : null,
+                ImageUrls = m.Role == "user" ? AiChatImageHelper.FromImagesDataJson(m.DataJson) : null
             }).ToList();
 
             return new SysAiChatDetailDto
@@ -230,11 +235,33 @@ namespace ZR.ServiceCore.AI
         /// <param name="sessionId">会话ID</param>
         /// <param name="userId">用户ID</param>
         /// <param name="message">消息内容</param>
+        /// <param name="imageUrls">本轮图片 URL；非空时走视觉模型且不调工具</param>
         /// <returns>聊天结果</returns>
         /// <exception cref="Exception"></exception>
-        public async Task<SysAiChatResultDto> ChatAsync(long sessionId, long userId, string message)
+        public async Task<SysAiChatResultDto> ChatAsync(long sessionId, long userId, string message, IReadOnlyList<string> imageUrls = null)
         {
-            var context = await PrepareChatContextAsync(sessionId, userId, message);
+            var context = await PrepareChatContextAsync(sessionId, userId, message, imageUrls);
+
+            if (context.UseVision)
+            {
+                string visionReply;
+                try
+                {
+                    visionReply = await _llm.ChatWithImagesAsync(context.Options, context.VisionSystemPrompt, context.VisionUserPrompt,
+                        context.ModelImageUrls, AiSceneCatalog.AiChat);
+                }
+                catch (Exception ex)
+                {
+                    _logger.Error($"AI 视觉调用异常 sessionId={context.Session.SessionId} userId={userId} model={context.Model} msg={AiHelper.ClipText(context.Message, 200)} err={ex}");
+                    throw;
+                }
+                if (string.IsNullOrWhiteSpace(visionReply))
+                {
+                    visionReply = "抱歉，我这边没有正常生成回答，请重新描述一下你的问题。";
+                }
+                return await FinishTurnAsync(context.Session, context.IsNewSession, userId, context.Message, visionReply, context.Model,
+                    false, 0, 0, 0, null, context.StoreImageUrls);
+            }
 
             // 3. 工具调用编排
             string reply = "";
@@ -294,11 +321,38 @@ namespace ZR.ServiceCore.AI
         /// 仅模型调用走 stream=true。事件类型见 SysAiChatStreamDto：
         /// delta=模型增量文本（实时推送）；tool=工具执行开始/结束；done=整轮结束（含落库结果）。
         /// 模型/业务异常直接向上抛出，由调用方转为 error 事件；成功流必有最后一个 done 事件。
+        /// 有图时走视觉模型（无工具，整段回复一次推送，心跳保活等待）。
         /// </summary>
-        public async IAsyncEnumerable<SysAiChatStreamDto> StreamChatAsync(long sessionId, long userId, string message, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        public async IAsyncEnumerable<SysAiChatStreamDto> StreamChatAsync(long sessionId, long userId, string message, IReadOnlyList<string> imageUrls = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var context = await PrepareChatContextAsync(sessionId, userId, message);
+            var context = await PrepareChatContextAsync(sessionId, userId, message, imageUrls);
+
+            if (context.UseVision)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                string visionReply;
+                try
+                {
+                    visionReply = await _llm.ChatWithImagesAsync(context.Options, context.VisionSystemPrompt, context.VisionUserPrompt,
+                        context.ModelImageUrls, AiSceneCatalog.AiChat);
+                }
+                catch (Exception ex)
+                {
+                    _logger.Error($"AI 视觉调用异常 sessionId={context.Session.SessionId} userId={userId} model={context.Model} msg={AiHelper.ClipText(context.Message, 200)} err={ex}");
+                    throw;
+                }
+                if (string.IsNullOrWhiteSpace(visionReply))
+                {
+                    _logger.Error($"AI 回复为空(触发兜底文案) userId={userId} sessionId={context.Session.SessionId} model={context.Model} vision=1 msg={AiHelper.ClipText(message, 200)}");
+                    visionReply = "抱歉，我这边没有正常生成回答，请重新描述一下你的问题。";
+                }
+                yield return new SysAiChatStreamDto { Type = "delta", Content = visionReply };
+                var visionResult = await FinishTurnAsync(context.Session, context.IsNewSession, userId, context.Message, visionReply, context.Model,
+                    false, 0, 0, 0, null, context.StoreImageUrls);
+                yield return ToDoneEvent(visionResult);
+                yield break;
+            }
 
             // 3. 工具调用编排（流式）
             string reply = "";
@@ -366,7 +420,12 @@ namespace ZR.ServiceCore.AI
             // 4. 落库 + 会话元信息维护
             var result = await FinishTurnAsync(context.Session, context.IsNewSession, userId, context.Message, reply, context.Model,
                 hasUsage, totalPromptTokens, totalCompletionTokens, totalTokens, charts);
-            yield return new SysAiChatStreamDto
+            yield return ToDoneEvent(result);
+        }
+
+        private static SysAiChatStreamDto ToDoneEvent(SysAiChatResultDto result)
+        {
+            return new SysAiChatStreamDto
             {
                 Type = "done",
                 SessionId = result.SessionId,
@@ -389,7 +448,7 @@ namespace ZR.ServiceCore.AI
                 SessionId = sessionId,
                 UserId = userId,
                 Role = role,
-                MsgType = string.IsNullOrWhiteSpace(dataJson) ? "text" : "chart",
+                MsgType = string.IsNullOrWhiteSpace(dataJson) ? "text" : (role == "user" ? "image" : "chart"),
                 Content = content ?? "",
                 DataJson = dataJson,
                 Model = model
@@ -411,9 +470,10 @@ namespace ZR.ServiceCore.AI
         private async Task<SysAiChatResultDto> FinishTurnAsync(AiChatSession session, bool isNewSession, long userId,
             string userMessage, string reply, string model,
             bool hasUsage, int totalPromptTokens, int totalCompletionTokens, int totalTokens,
-            List<AiChartViewDto> charts = null)
+            List<AiChartViewDto> charts = null, IReadOnlyList<string> storeImageUrls = null)
         {
-            await SaveMessageAsync(session.SessionId, userId, "user", userMessage, model);
+            var userJson = AiChatImageHelper.ToImagesDataJson(storeImageUrls);
+            await SaveMessageAsync(session.SessionId, userId, "user", userMessage, model, dataJson: userJson);
             var dataJson = AiChartAssembler.ToDataJson(charts);
             await SaveMessageAsync(session.SessionId, userId, "assistant", reply, model, totalPromptTokens, totalCompletionTokens, totalTokens, dataJson);
 
@@ -421,7 +481,11 @@ namespace ZR.ServiceCore.AI
             var newTitle = session.Title;
             if (needAutoTitle)
             {
-                newTitle = AiHelper.AutoTitle(userMessage);
+                var titleSrc = storeImageUrls != null && storeImageUrls.Count > 0 &&
+                    (string.IsNullOrWhiteSpace(userMessage) || userMessage == AiChatImageHelper.DefaultUserPrompt)
+                    ? "图片问答"
+                    : userMessage;
+                newTitle = AiHelper.AutoTitle(titleSrc);
             }
             await UpdateAsync(s => s.SessionId == session.SessionId,
                 s => new AiChatSession { Title = newTitle, UpdateTime = DateTime.Now });
@@ -682,22 +746,28 @@ namespace ZR.ServiceCore.AI
             public List<object> Messages { get; init; }
             public object[] Tools { get; init; }
             public int HistoryCount { get; init; }
+            public bool UseVision { get; init; }
+            public List<string> ModelImageUrls { get; init; }
+            public List<string> StoreImageUrls { get; init; }
+            public string VisionSystemPrompt { get; init; }
+            public string VisionUserPrompt { get; init; }
         }
 
         /// <summary>
-        /// 准备聊天上下文：会话解析/创建 + 历史消息回灌 + 系统提示 + 工具定义
+        /// 准备聊天上下文：会话解析/创建 + 历史消息回灌 + 系统提示 + 工具定义；
+        /// 有图时切视觉模型，不组装工具。
         /// </summary>
-        /// <param name="sessionId"></param>
-        /// <param name="userId"></param>
-        /// <param name="message"></param>
-        /// <returns></returns>
-        /// <exception cref="Exception"></exception>
-        private async Task<ChatContext> PrepareChatContextAsync(long sessionId, long userId, string message)
+        private async Task<ChatContext> PrepareChatContextAsync(long sessionId, long userId, string message, IReadOnlyList<string> imageUrls)
         {
+            var storeImages = AiChatImageHelper.NormalizeClientUrls(imageUrls);
             message = (message ?? "").Trim();
             if (string.IsNullOrWhiteSpace(message))
             {
-                throw new Exception("消息内容不能为空");
+                if (storeImages.Count == 0)
+                {
+                    throw new Exception("消息内容不能为空");
+                }
+                message = AiChatImageHelper.DefaultUserPrompt;
             }
             if (message.Length > MaxUserMessageLength)
             {
@@ -710,7 +780,35 @@ namespace ZR.ServiceCore.AI
 
             var isNewSession = sessionId <= 0;
             var session = await ResolveSessionAsync(sessionId, userId, isNewSession);
-            var (messages, historyCount) = await BuildConversationMessagesAsync(session.SessionId, userId, message);
+
+            if (storeImages.Count > 0)
+            {
+                var vision = _llm.ResolveVisionProvider(options);
+                if (string.IsNullOrWhiteSpace(vision.Model))
+                {
+                    throw new Exception("未配置视觉模型。请在当前 Provider 的 VisionModel 中指定支持多模态的模型，或联系管理员配置。");
+                }
+                var modelImages = AiChatImageHelper.ToModelImageUrls(storeImages, _env?.WebRootPath, options);
+                var (visionSystem, visionUser, historyCount) = await BuildVisionPromptsAsync(session.SessionId, userId, message, storeImages.Count);
+                return new ChatContext
+                {
+                    Message = message,
+                    Options = options,
+                    Model = vision.Model,
+                    IsNewSession = isNewSession,
+                    Session = session,
+                    Messages = [],
+                    Tools = [],
+                    HistoryCount = historyCount,
+                    UseVision = true,
+                    ModelImageUrls = modelImages,
+                    StoreImageUrls = storeImages,
+                    VisionSystemPrompt = visionSystem,
+                    VisionUserPrompt = visionUser
+                };
+            }
+
+            var (messages, textHistoryCount) = await BuildConversationMessagesAsync(session.SessionId, userId, message);
 
             return new ChatContext
             {
@@ -721,8 +819,44 @@ namespace ZR.ServiceCore.AI
                 Session = session,
                 Messages = messages,
                 Tools = BuildToolObjects(userId),
-                HistoryCount = historyCount
+                HistoryCount = textHistoryCount
             };
+        }
+
+        private async Task<(string SystemPrompt, string UserPrompt, int HistoryCount)> BuildVisionPromptsAsync(
+            long sessionId, long userId, string message, int imageCount)
+        {
+            var text = AiHelper.LoadPrompt("system/ai-chat-vision.md");
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                throw new Exception("AI 助手提示词文件缺失：system/ai-chat-vision.md（请检查 Prompts 目录）");
+            }
+            var system = text
+                .Replace("{{now}}", DateTime.Now.ToString("yyyy-MM-dd HH:mm"))
+                .Replace("{{userId}}", userId.ToString());
+
+            var history = await Context.Queryable<AiChatMessage>()
+                .Where(m => m.SessionId == sessionId && m.UserId == userId && m.Role != "tool")
+                .OrderBy(m => m.CreateTime, OrderByType.Desc)
+                .Take(MaxHistoryMessages)
+                .ToListAsync();
+            history.Reverse();
+
+            var sb = new System.Text.StringBuilder();
+            if (history.Count > 0)
+            {
+                sb.AppendLine("近期对话（仅文本，不含历史图片）：");
+                foreach (var h in history)
+                {
+                    sb.AppendLine($"{h.Role}: {AiHelper.ClipText(h.Content, 500)}");
+                }
+                sb.AppendLine();
+            }
+            sb.AppendLine("用户本轮问题：");
+            sb.AppendLine(message);
+            sb.AppendLine();
+            sb.AppendLine($"用户附带了 {imageCount} 张图片，请结合图片作答。本轮无法调用系统工具。");
+            return (system, sb.ToString(), history.Count);
         }
 
         /// <summary>

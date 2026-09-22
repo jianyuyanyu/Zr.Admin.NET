@@ -329,29 +329,29 @@ namespace Infrastructure.Model
         public string PromptDir { get; set; }
 
         /// <summary>
-        /// 视觉模型 Provider（如 openai / qwen）。用于图片多模态理解，与文本模型解耦。
-        /// 留空则复用顶层 Provider。
+        /// 视觉模型 Provider。留空则用当前文本 Provider（顶层 Provider）。
+        /// 仅当看图要走另一家供应商时才填。
         /// </summary>
         public string VisionProvider { get; set; }
 
         /// <summary>
-        /// 视觉模型接口基地址。留空则按 VisionProvider 取默认值。
+        /// 视觉接口基地址覆盖。留空则用目标 Provider 的 BaseUrl / 默认地址。
         /// </summary>
         public string VisionBaseUrl { get; set; }
 
         /// <summary>
-        /// 视觉模型聊天接口路径。留空则按 VisionProvider 取默认值。
+        /// 视觉聊天接口路径覆盖。留空则用目标 Provider 的 ChatEndpoint / 默认路径。
         /// </summary>
         public string VisionChatEndpoint { get; set; }
 
         /// <summary>
-        /// 视觉模型名称（必须支持多模态，如 gpt-4o-mini）。留空表示未配置视觉模型，
-        /// 调用看图能力时抛出友好提示。
+        /// 视觉模型覆盖。留空则用目标 Provider 的 <see cref="AiProviderOptions.VisionModel"/>。
+        /// 都为空表示未开通看图。
         /// </summary>
         public string VisionModel { get; set; }
 
         /// <summary>
-        /// 视觉模型 API Key。留空则复用顶层 ApiKey。
+        /// 视觉 API Key 覆盖。留空则用目标 Provider 的 ApiKey。
         /// </summary>
         public string VisionApiKey { get; set; }
 
@@ -391,6 +391,12 @@ namespace Infrastructure.Model
         public string ChatEndpoint { get; set; }
 
         public string Model { get; set; }
+
+        /// <summary>
+        /// 该 Provider 的看图模型（须支持多模态）。与文本 Model 分离，共用本项 BaseUrl / ApiKey。
+        /// 留空表示此供应商不开通看图。
+        /// </summary>
+        public string VisionModel { get; set; }
 
         /// <summary>该 Provider 可出现在下拉中的模型建议；真正发请求仍用 Model。</summary>
         public List<string> Models { get; set; }

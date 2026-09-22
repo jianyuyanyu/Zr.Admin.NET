@@ -31,6 +31,9 @@ namespace ZR.Model.AI.Dto
         public int? TotalTokens { get; set; }
         /// <summary>本条助手消息附带的图表（配置+后端数据），用户消息为空</summary>
         public List<AiChartViewDto> Charts { get; set; }
+
+        /// <summary>本条用户消息附带的图片 URL（助手消息为空）</summary>
+        public List<string> ImageUrls { get; set; }
     }
 
     /// <summary>
@@ -54,6 +57,13 @@ namespace ZR.Model.AI.Dto
         public long SessionId { get; set; }
         [StringLength(2000, ErrorMessage = "消息长度不能超过 2000 字符")]
         public string Message { get; set; }
+
+        /// <summary>
+        /// 本轮图片（已上传后的访问 URL 或站点相对路径），最多 4 张。
+        /// 有图时本轮走视觉模型、不调用工具；无图时走原文本+工具编排。
+        /// </summary>
+        [MaxLength(4, ErrorMessage = "一次最多发送 4 张图片")]
+        public List<string> ImageUrls { get; set; }
     }
 
     /// <summary>

@@ -78,7 +78,7 @@ namespace Infrastructure.AI
         /// </summary>
         private static async Task<string> ChatCoreAsync(AiOptions options, object messages,
             (string Provider, string BaseUrl, string ChatEndpoint, string Model, string ApiKey)? resolvedOverride = null,
-            string scene = null)
+            string scene = null, bool skipThinking = false)
         {
             var resolved = resolvedOverride ?? ResolveProvider(options);
             var uri = BuildRequestUriWith(options, resolved);
@@ -90,7 +90,7 @@ namespace Infrastructure.AI
                 ["max_tokens"] = options.MaxTokens,
                 ["stream"] = false
             };
-            ApplyThinkingOptions(payload, resolved.Provider, options.EnableThinking);
+            ApplyThinkingOptions(payload, resolved.Provider, resolved.Model, options.EnableThinking, skipThinking);
 
             var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions
             {
@@ -107,12 +107,16 @@ namespace Infrastructure.AI
             try
             {
                 var response = await HttpHelper.HttpPostDetailedAsync(
-                    uri.ToString(), json, "application/json", options.TimeoutSeconds, headers).ConfigureAwait(false);
+                    uri.ToString(), json, "application/json", ResolveTimeoutSeconds(options, resolved.Provider), headers).ConfigureAwait(false);
                 if (!response.IsSuccessStatusCode)
                 {
-                    outcome = Failed("http", "http_error", BuildAiErrorMessage(response.StatusCode, response.Content),
-                        response.StatusCode, response.RequestId);
-                    throw new HttpRequestException("AI 服务调用失败，请稍后重试或检查 AI 配置");
+                    var errDetail = BuildAiErrorMessage(response.StatusCode, response.Content);
+                    outcome = Failed("http", "http_error", errDetail, response.StatusCode, response.RequestId);
+                    Logger.LogError(
+                        "AI 请求失败 status={Status} uri={Uri} provider={Provider} model={Model} body={Body}",
+                        response.StatusCode, uri, resolved.Provider, resolved.Model, TruncateForLog(response.Content, 800));
+                    throw new HttpRequestException(
+                        $"AI 服务调用失败（HTTP {response.StatusCode}，model={resolved.Model}）：{TruncateForLog(errDetail, 240)}");
                 }
                 if (string.IsNullOrWhiteSpace(response.Content))
                 {
@@ -240,14 +244,13 @@ namespace Infrastructure.AI
         }
 
         /// <summary>
-        /// 解析视觉模型配置：从 AiOptions 的 Vision* 字段取配置，空字段回退顶层文本配置与默认值。
-        /// 返回用于实际请求的 provider/baseUrl/endpoint/model/apiKey。
-        /// 注意：视觉模型不做默认值回退——仅当显式配置 VisionModel，或显式指定 VisionProvider 时继承该分项 Model；
-        /// 否则保持为空，由 ChatWithImagesAsync 抛"未配置视觉模型"友好提示（否则图片会被静默发给不支持视觉的文本模型）。
+        /// 解析视觉模型配置。优先级：
+        /// 顶层 Vision* 覆盖 → 目标 Provider 分项（VisionModel / BaseUrl / ApiKey）→ 该 Provider 默认地址。
+        /// 目标 Provider = VisionProvider（若填）否则顶层 Provider。
+        /// 不会把文本 Model 当成视觉模型，避免把图片发给不支持多模态的模型。
         /// </summary>
         public static (string Provider, string BaseUrl, string ChatEndpoint, string Model, string ApiKey) ResolveVisionProvider(AiOptions options)
         {
-            var visionProviderSet = !string.IsNullOrWhiteSpace(options.VisionProvider);
             var provider = (options.VisionProvider ?? options.Provider ?? "openai").Trim().ToLowerInvariant();
             var baseUrl = (options.VisionBaseUrl ?? string.Empty).Trim();
             var endpoint = (options.VisionChatEndpoint ?? string.Empty).Trim();
@@ -261,9 +264,7 @@ namespace Infrastructure.AI
             {
                 if (string.IsNullOrWhiteSpace(baseUrl)) baseUrl = (matched.BaseUrl ?? string.Empty).Trim();
                 if (string.IsNullOrWhiteSpace(endpoint)) endpoint = (matched.ChatEndpoint ?? string.Empty).Trim();
-                // 仅在显式指定 VisionProvider 时才允许继承分项 Model；分项 Model 属于文本模型，
-                // 未显式指定时静默继承会把图片发给不支持视觉的模型
-                if (visionProviderSet && string.IsNullOrWhiteSpace(model)) model = (matched.Model ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(model)) model = (matched.VisionModel ?? string.Empty).Trim();
                 if (string.IsNullOrWhiteSpace(apiKey)) apiKey = (matched.ApiKey ?? string.Empty).Trim();
             }
 
@@ -282,7 +283,7 @@ namespace Infrastructure.AI
             var resolved = ResolveVisionProvider(options);
             if (string.IsNullOrWhiteSpace(resolved.Model))
             {
-                throw new InvalidOperationException("未配置视觉模型（AiOptions:VisionModel），无法使用图片理解能力。请在配置中指定支持多模态的模型，如 gpt-4o-mini。");
+                throw new InvalidOperationException("未配置视觉模型。请在当前 Provider 的 VisionModel（或顶层 AiOptions:VisionModel）中指定支持多模态的模型，如 qwen-vl-plus / gpt-4o-mini。");
             }
 
             var content = new List<object>
@@ -300,7 +301,7 @@ namespace Infrastructure.AI
                 new { role = "system", content = (object)systemPrompt },
                 new { role = "user", content = (object)content }
             };
-            return await ChatCoreAsync(options, messages, resolved, scene).ConfigureAwait(false);
+            return await ChatCoreAsync(options, messages, resolved, scene, skipThinking: true).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -348,17 +349,8 @@ namespace Infrastructure.AI
         {
             var resolved = ResolveProvider(options);
             var uri = BuildRequestUri(options);
-            var payload = new Dictionary<string, object>
-            {
-                ["model"] = resolved.Model,
-                ["messages"] = messages,
-                ["tools"] = tools,
-                ["tool_choice"] = "auto",
-                ["temperature"] = options.Temperature,
-                ["max_tokens"] = options.MaxTokens,
-                ["stream"] = false
-            };
-            ApplyThinkingOptions(payload, resolved.Provider, options.EnableThinking);
+            var payload = BuildChatPayload(options, resolved, messages, tools, stream: false);
+            ApplyThinkingOptions(payload, resolved.Provider, resolved.Model, options.EnableThinking);
 
             var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions
             {
@@ -375,12 +367,16 @@ namespace Infrastructure.AI
             try
             {
                 var response = await HttpHelper.HttpPostDetailedAsync(
-                    uri.ToString(), json, "application/json", options.TimeoutSeconds, headers).ConfigureAwait(false);
+                    uri.ToString(), json, "application/json", ResolveTimeoutSeconds(options, resolved.Provider), headers).ConfigureAwait(false);
                 if (!response.IsSuccessStatusCode)
                 {
-                    outcome = Failed("http", "http_error", BuildAiErrorMessage(response.StatusCode, response.Content),
-                        response.StatusCode, response.RequestId);
-                    throw new HttpRequestException("AI 服务调用失败，请稍后重试或检查 AI 配置");
+                    var errDetail = BuildAiErrorMessage(response.StatusCode, response.Content);
+                    outcome = Failed("http", "http_error", errDetail, response.StatusCode, response.RequestId);
+                    Logger.LogError(
+                        "AI 请求失败 status={Status} uri={Uri} provider={Provider} model={Model} body={Body}",
+                        response.StatusCode, uri, resolved.Provider, resolved.Model, TruncateForLog(response.Content, 800));
+                    throw new HttpRequestException(
+                        $"AI 服务调用失败（HTTP {response.StatusCode}，model={resolved.Model}）：{TruncateForLog(errDetail, 240)}");
                 }
                 if (string.IsNullOrWhiteSpace(response.Content))
                 {
@@ -463,19 +459,8 @@ namespace Infrastructure.AI
             cancellationToken.ThrowIfCancellationRequested();
             var resolved = ResolveProvider(options);
             var uri = BuildRequestUri(options);
-            var payload = new Dictionary<string, object>
-            {
-                ["model"] = resolved.Model,
-                ["messages"] = messages,
-                ["tools"] = tools,
-                ["tool_choice"] = "auto",
-                ["temperature"] = options.Temperature,
-                ["max_tokens"] = options.MaxTokens,
-                ["stream"] = true,
-                // OpenAI 兼容协议：流式默认不回传 usage，须显式声明才能在最后一个分片拿到 token 用量
-                ["stream_options"] = new Dictionary<string, object> { ["include_usage"] = true }
-            };
-            ApplyThinkingOptions(payload, resolved.Provider, options.EnableThinking);
+            var payload = BuildChatPayload(options, resolved, messages, tools, stream: true);
+            ApplyThinkingOptions(payload, resolved.Provider, resolved.Model, options.EnableThinking);
 
             var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions
             {
@@ -490,7 +475,7 @@ namespace Infrastructure.AI
             AiCallOutcome outcome = null;
             try
             {
-                using var streamResp = await HttpHelper.HttpPostReadStreamAsync(uri.ToString(), json, "application/json", options.TimeoutSeconds, headers);
+                using var streamResp = await HttpHelper.HttpPostReadStreamAsync(uri.ToString(), json, "application/json", ResolveTimeoutSeconds(options, resolved.Provider), headers);
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(streamResp.Token, cancellationToken);
                 var token = linkedCts.Token;
 
@@ -743,7 +728,7 @@ namespace Infrastructure.AI
                 Scene = scene,
                 Provider = provider,
                 Model = model,
-                EstimatedPromptTokens = string.IsNullOrEmpty(payload) ? 0 : Math.Max(1, payload.Length / 4),
+                EstimatedPromptTokens = EstimatePromptTokensForGovernance(payload),
                 MaxCompletionTokens = Math.Max(0, maxTokens),
                 IsStream = isStream
             });
@@ -997,19 +982,72 @@ namespace Infrastructure.AI
         }
 
         /// <summary>
-        /// 按 provider 判断是否支持 enable_thinking（混合思考模型：Qwen3 系列等），
-        /// 支持则在请求体显式写入该参数，避免默认开启思考导致首字延迟高。其余 provider 不加。
-        /// <paramref name="enableThinking"/>是否启用混合思考模型（Qwen3 系列等），默认 false。
-        /// <paramref name="payload"/> 请求体字典，按 provider 可能写入 enable_thinking。
-        /// <paramref name="provider"/> provider 名称，按名称判断是否支持 enable_thinking。
+        /// 按 provider/model 判断是否写入 enable_thinking。
+        /// 仅通义文本混合思考模型需要；看图请求或视觉模型（qwen-vl-* 等）带此字段常直接 400。
         /// </summary>
-        private static void ApplyThinkingOptions(Dictionary<string, object> payload, string provider, bool enableThinking)
+        private static void ApplyThinkingOptions(Dictionary<string, object> payload, string provider, string model, bool enableThinking, bool skipThinking = false)
         {
-            var isQwen = string.Equals((provider ?? "").Trim(), "qwen", StringComparison.OrdinalIgnoreCase);
-            if (isQwen)
+            if (skipThinking)
             {
-                payload["enable_thinking"] = enableThinking;
+                return;
             }
+            if (!string.Equals((provider ?? "").Trim(), "qwen", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+            if (IsVisionModel(model))
+            {
+                return;
+            }
+            payload["enable_thinking"] = enableThinking;
+        }
+
+        /// <summary>名称含 vl / vision 的视为视觉模型，不写 enable_thinking。</summary>
+        private static bool IsVisionModel(string model)
+        {
+            var m = (model ?? "").Trim().ToLowerInvariant();
+            return m.Contains("-vl") || m.Contains("vl-") || m.Contains("vision");
+        }
+
+        /// <summary>
+        /// 组装 chat/completions 负载。Ollama 等本地兼容端对 OpenAI 扩展字段（stream_options）支持差，
+        /// 多带会导致挂起或空响应；tools 为空时也不下发 tool_choice。
+        /// </summary>
+        private static Dictionary<string, object> BuildChatPayload(
+            AiOptions options,
+            (string Provider, string BaseUrl, string ChatEndpoint, string Model, string ApiKey) resolved,
+            object[] messages,
+            object[] tools,
+            bool stream)
+        {
+            var payload = new Dictionary<string, object>
+            {
+                ["model"] = resolved.Model,
+                ["messages"] = messages,
+                ["temperature"] = options.Temperature,
+                ["max_tokens"] = options.MaxTokens,
+                ["stream"] = stream
+            };
+
+            if (tools != null && tools.Length > 0)
+            {
+                payload["tools"] = tools;
+                payload["tool_choice"] = "auto";
+            }
+
+            // stream_options.include_usage 仅 OpenAI 系可靠；Ollama 常不认导致长时间无分片
+            if (stream && SupportsStreamUsageOptions(resolved.Provider))
+            {
+                payload["stream_options"] = new Dictionary<string, object> { ["include_usage"] = true };
+            }
+
+            return payload;
+        }
+
+        private static bool SupportsStreamUsageOptions(string provider)
+        {
+            var p = (provider ?? "").Trim().ToLowerInvariant();
+            return p is "openai" or "deepseek" or "qwen" or "bigmodel";
         }
 
         private static string GetDefaultBaseUrl(string provider)
@@ -1018,6 +1056,7 @@ namespace Infrastructure.AI
             {
                 "deepseek" => "https://api.deepseek.com",
                 "qwen" => "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "ollama" => "http://127.0.0.1:11434/v1",
                 _ => "https://api.openai.com"
             };
         }
@@ -1028,6 +1067,7 @@ namespace Infrastructure.AI
             {
                 "deepseek" => "/chat/completions",
                 "qwen" => "/chat/completions",
+                "ollama" => "/chat/completions",
                 _ => "/v1/chat/completions"
             };
         }
@@ -1038,8 +1078,46 @@ namespace Infrastructure.AI
             {
                 "deepseek" => "deepseek-chat",
                 "qwen" => "qwen-turbo",
+                "ollama" => "qwen2.5:7b",
                 _ => "gpt-4o-mini"
             };
+        }
+
+        /// <summary>Ollama 等本地服务不强制云厂商 ApiKey。</summary>
+        public static bool AllowsEmptyApiKey(string provider)
+        {
+            return string.Equals((provider ?? "").Trim(), "ollama", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// 治理预估 token：含 data URI 时按文件体积估算，避免把 Base64 字符数当成 prompt tokens 撑爆额度。
+        /// </summary>
+        private static int EstimatePromptTokensForGovernance(string payload)
+        {
+            if (string.IsNullOrEmpty(payload)) return 0;
+            // data:image/...;base64,XXXX —— Base64 约 4/3 原文件，视觉模型按图块计费，给固定上限即可
+            const string marker = "data:image/";
+            var idx = payload.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (idx < 0)
+            {
+                return Math.Max(1, Math.Min(payload.Length / 4, 200_000));
+            }
+            var textLen = idx;
+            var dataUriApproxBytes = Math.Max(0, (payload.Length - idx) * 3 / 4);
+            var imageTokens = Math.Min(8_000, Math.Max(1_000, dataUriApproxBytes / 256));
+            var textTokens = Math.Max(1, textLen / 4);
+            return Math.Min(textTokens + imageTokens, 50_000);
+        }
+
+        /// <summary>分项 TimeoutSeconds 优先，否则用顶层，缺省 60 秒。</summary>
+        public static int ResolveTimeoutSeconds(AiOptions options, string provider = null)
+        {
+            var p = (provider ?? options?.Provider ?? "").Trim();
+            var matched = (options?.Providers ?? new List<AiProviderOptions>())
+                .FirstOrDefault(x => string.Equals((x.Provider ?? string.Empty).Trim(), p, StringComparison.OrdinalIgnoreCase));
+            if (matched?.TimeoutSeconds is int t && t > 0) return t;
+            var top = options?.TimeoutSeconds ?? 0;
+            return top > 0 ? top : 60;
         }
     }
 }

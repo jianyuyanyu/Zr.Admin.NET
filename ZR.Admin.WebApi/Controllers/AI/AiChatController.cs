@@ -115,12 +115,12 @@ namespace ZR.Admin.WebApi.Controllers.AI
         [ActionPermissionFilter(Permission = "common")]
         public async Task<IActionResult> Chat([FromBody] SysAiChatRequestDto parm)
         {
-            if (parm == null || string.IsNullOrWhiteSpace(parm.Message))
+            if (!IsChatRequestValid(parm))
             {
-                return ToResponse(ResultCode.FAIL, "消息内容不能为空");
+                return ToResponse(ResultCode.FAIL, "请输入文字或上传图片");
             }
             var userId = HttpContext.GetUId();
-            return SUCCESS(await _aiChatService.ChatAsync(parm.SessionId, userId, parm.Message));
+            return SUCCESS(await _aiChatService.ChatAsync(parm.SessionId, userId, parm.Message, parm.ImageUrls));
         }
 
         /// <summary>
@@ -131,10 +131,10 @@ namespace ZR.Admin.WebApi.Controllers.AI
         [ActionPermissionFilter(Permission = "common")]
         public async Task ChatStream([FromBody] SysAiChatRequestDto parm)
         {
-            if (parm == null || string.IsNullOrWhiteSpace(parm.Message))
+            if (!IsChatRequestValid(parm))
             {
                 Response.StatusCode = StatusCodes.Status400BadRequest;
-                await Response.WriteAsync("{\"msg\":\"消息内容不能为空\"}", HttpContext.RequestAborted);
+                await Response.WriteAsync("{\"msg\":\"请输入文字或上传图片\"}", HttpContext.RequestAborted);
                 return;
             }
             var userId = HttpContext.GetUId();
@@ -193,7 +193,7 @@ namespace ZR.Admin.WebApi.Controllers.AI
 
             try
             {
-                await foreach (var evt in _aiChatService.StreamChatAsync(parm.SessionId, userId, parm.Message, aborted))
+                await foreach (var evt in _aiChatService.StreamChatAsync(parm.SessionId, userId, parm.Message, parm.ImageUrls, aborted))
                 {
                     await WriteEventAsync(evt, aborted);
                 }
@@ -219,6 +219,13 @@ namespace ZR.Admin.WebApi.Controllers.AI
                 pingCts.Cancel();
                 try { await pingTask; } catch { /* pingTask 内部已兜底，正常不会抛出 */ }
             }
+        }
+
+        private static bool IsChatRequestValid(SysAiChatRequestDto parm)
+        {
+            if (parm == null) return false;
+            if (!string.IsNullOrWhiteSpace(parm.Message)) return true;
+            return parm.ImageUrls != null && parm.ImageUrls.Any(u => !string.IsNullOrWhiteSpace(u));
         }
 
         private static readonly JsonSerializerOptions SseJsonOptions = new()
