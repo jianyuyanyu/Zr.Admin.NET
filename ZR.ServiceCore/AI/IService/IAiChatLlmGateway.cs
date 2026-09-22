@@ -23,7 +23,7 @@ namespace ZR.ServiceCore.AI.IService
         (string Provider, string BaseUrl, string ChatEndpoint, string Model, string ApiKey) ResolveVisionProvider(AiOptions options);
 
         /// <summary>多模态看图（无工具）。imageUrls 为 http(s) 或 data URI。</summary>
-        Task<string> ChatWithImagesAsync(AiOptions options, string systemPrompt, string textPrompt, List<string> imageUrls, string scene = null);
+        Task<AiLlmClient.ChatToolResult> ChatWithImagesAsync(AiOptions options, string systemPrompt, string textPrompt, List<string> imageUrls, string scene = null);
 
         /// <summary>
         /// 非流式（stream=false）function calling 单轮调用

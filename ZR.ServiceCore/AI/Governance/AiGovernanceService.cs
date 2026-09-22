@@ -286,6 +286,7 @@ namespace ZR.ServiceCore.AI.Governance
             EnsurePlatformAdmin();
             var resolved = AiLlmClient.ResolveProvider(_options);
             var key = resolved.ApiKey ?? string.Empty;
+            var vision = AiLlmClient.ResolveVisionProvider(_options);
             var result = new AiConfigCheckDto
             {
                 Enabled = _options.Enable,
@@ -295,7 +296,8 @@ namespace ZR.ServiceCore.AI.Governance
                 Model = resolved.Model,
                 ApiKeyConfigured = AiLlmClient.AllowsEmptyApiKey(resolved.Provider)
                     || (!string.IsNullOrWhiteSpace(key) && !key.Contains("xxx", StringComparison.OrdinalIgnoreCase)),
-                VisionConfigured = !string.IsNullOrWhiteSpace(AiLlmClient.ResolveVisionProvider(_options).Model)
+                VisionConfigured = !string.IsNullOrWhiteSpace(vision.Model),
+                VisionModel = vision.Model
             };
             if (!_options.Enable) result.Warnings.Add("AI 总开关未启用");
             if (!Uri.TryCreate(resolved.BaseUrl, UriKind.Absolute, out var uri)
@@ -305,6 +307,10 @@ namespace ZR.ServiceCore.AI.Governance
                 result.Warnings.Add("Provider BaseUrl 未使用 HTTPS");
             if (!result.ApiKeyConfigured) result.Warnings.Add("API Key 缺失或仍为占位值");
             if (string.IsNullOrWhiteSpace(resolved.Model)) result.Warnings.Add("模型名称未配置");
+            if (string.IsNullOrWhiteSpace(result.VisionModel))
+            {
+                result.Warnings.Add("当前 Provider 未配置 VisionModel，发图提问将失败");
+            }
             if (_options.TimeoutSeconds <= 0) result.Warnings.Add("请求超时时间必须大于 0");
             var promptDir = string.IsNullOrWhiteSpace(_options.PromptDir)
                 ? Path.Combine(AppContext.BaseDirectory, "Prompts")

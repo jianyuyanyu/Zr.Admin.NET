@@ -34,6 +34,9 @@ namespace ZR.Model.AI.Dto
 
         /// <summary>本条用户消息附带的图片 URL（助手消息为空）</summary>
         public List<string> ImageUrls { get; set; }
+
+        /// <summary>本条助手消息本轮调用过的工具（用户消息为空）</summary>
+        public List<AiChatToolCallDto> Tools { get; set; }
     }
 
     /// <summary>
@@ -87,6 +90,9 @@ namespace ZR.Model.AI.Dto
         public int? TotalTokens { get; set; }
         /// <summary>本轮助手回复附带的图表（配置+数据），无图时为空</summary>
         public List<AiChartViewDto> Charts { get; set; }
+
+        /// <summary>本轮调用过的工具摘要</summary>
+        public List<AiChatToolCallDto> Tools { get; set; }
     }
 
     /// <summary>
@@ -200,7 +206,17 @@ namespace ZR.Model.AI.Dto
         /// <summary>done：本轮回复附带的图表（配置+数据），无图时为空</summary>
         public List<AiChartViewDto> Charts { get; set; }
 
+        /// <summary>done：本轮工具调用摘要</summary>
+        public List<AiChatToolCallDto> Tools { get; set; }
+
         /// <summary>error：错误描述（可展示给用户）</summary>
         public string Error { get; set; }
+    }
+
+    /// <summary>助手本轮一次工具调用的落库/展示摘要</summary>
+    public class AiChatToolCallDto
+    {
+        public string Name { get; set; }
+        public bool Ok { get; set; }
     }
 }

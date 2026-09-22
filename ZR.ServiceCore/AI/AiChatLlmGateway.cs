@@ -21,7 +21,7 @@ namespace ZR.ServiceCore.AI
             => AiLlmClient.ResolveVisionProvider(options);
 
         /// <summary>多模态看图（转发 AiLlmClient）</summary>
-        public Task<string> ChatWithImagesAsync(AiOptions options, string systemPrompt, string textPrompt, List<string> imageUrls, string scene = null)
+        public Task<AiLlmClient.ChatToolResult> ChatWithImagesAsync(AiOptions options, string systemPrompt, string textPrompt, List<string> imageUrls, string scene = null)
             => AiLlmClient.ChatWithImagesAsync(options, systemPrompt, textPrompt, imageUrls, scene);
 
         /// <summary>非流式 function calling 单轮调用（转发 AiLlmClient）</summary>

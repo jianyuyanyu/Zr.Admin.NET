@@ -68,33 +68,49 @@ namespace ZR.ServiceCore.AI.Charts
 
         public static List<AiChartViewDto> FromDataJson(string dataJson)
         {
-            if (string.IsNullOrWhiteSpace(dataJson))
-            {
-                return [];
-            }
-            try
-            {
-                var wrap = JsonConvert.DeserializeObject<ChartExtra>(dataJson);
-                return wrap?.Charts ?? [];
-            }
-            catch
-            {
-                return [];
-            }
+            return ParseExtra(dataJson)?.Charts ?? [];
         }
 
-        public static string ToDataJson(List<AiChartViewDto> charts)
+        public static List<AiChatToolCallDto> FromToolsDataJson(string dataJson)
         {
-            if (charts == null || charts.Count == 0)
+            return ParseExtra(dataJson)?.Tools ?? [];
+        }
+
+        public static string ToDataJson(List<AiChartViewDto> charts, List<AiChatToolCallDto> tools = null)
+        {
+            var hasCharts = charts != null && charts.Count > 0;
+            var hasTools = tools != null && tools.Count > 0;
+            if (!hasCharts && !hasTools)
             {
                 return null;
             }
-            return JsonConvert.SerializeObject(new ChartExtra { Charts = charts });
+            return JsonConvert.SerializeObject(new ChartExtra
+            {
+                Charts = hasCharts ? charts : null,
+                Tools = hasTools ? tools : null
+            });
+        }
+
+        private static ChartExtra ParseExtra(string dataJson)
+        {
+            if (string.IsNullOrWhiteSpace(dataJson))
+            {
+                return null;
+            }
+            try
+            {
+                return JsonConvert.DeserializeObject<ChartExtra>(dataJson);
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         private sealed class ChartExtra
         {
             public List<AiChartViewDto> Charts { get; set; }
+            public List<AiChatToolCallDto> Tools { get; set; }
         }
 
         private static List<AiChartSpecDto> ExtractSpecs(string reply)

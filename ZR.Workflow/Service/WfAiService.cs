@@ -807,8 +807,8 @@ namespace ZR.Workflow.Service
             if (imgUrls.Count > 0)
             {
                 // 含图片附件：走视觉模型多模态理解（VisionModel 未配置时此方法内部抛友好提示）
-                text = await AiLlmClient.ChatWithImagesAsync(
-                    options, AiHelper.GetPromptOrThrow("approval-suggest.md", "审批意见建议"), user, imgUrls, AiSceneCatalog.WfApprovalSuggest).ConfigureAwait(false);
+                text = (await AiLlmClient.ChatWithImagesAsync(
+                    options, AiHelper.GetPromptOrThrow("approval-suggest.md", "审批意见建议"), user, imgUrls, AiSceneCatalog.WfApprovalSuggest).ConfigureAwait(false))?.Content;
             }
             else
             {
@@ -1262,8 +1262,8 @@ namespace ZR.Workflow.Service
             if (imgUrls.Count > 0)
             {
                 var options = AiHelper.EnsureAiEnabled();
-                text = await AiLlmClient.ChatWithImagesAsync(
-                    options, AiHelper.GetPromptOrThrow("risk-check.md", "审批风险预判"), userContext, imgUrls, AiSceneCatalog.WfRiskCheck).ConfigureAwait(false);
+                text = (await AiLlmClient.ChatWithImagesAsync(
+                    options, AiHelper.GetPromptOrThrow("risk-check.md", "审批风险预判"), userContext, imgUrls, AiSceneCatalog.WfRiskCheck).ConfigureAwait(false))?.Content;
             }
             else
             {

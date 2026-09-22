@@ -81,6 +81,7 @@ namespace ZR.Model.AI.Dto
         public string Model { get; set; }
         public bool ApiKeyConfigured { get; set; }
         public bool VisionConfigured { get; set; }
+        public string VisionModel { get; set; }
         public List<string> Warnings { get; set; } = new();
     }
 

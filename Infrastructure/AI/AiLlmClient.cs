@@ -59,7 +59,8 @@ namespace Infrastructure.AI
                 new { role = "system", content = systemPrompt },
                 new { role = "user", content = userPrompt }
             };
-            return await ChatCoreAsync(options, messages, scene: scene).ConfigureAwait(false);
+            var result = await ChatCoreAsync(options, messages, scene: scene).ConfigureAwait(false);
+            return result?.Content ?? string.Empty;
         }
 
         /// <summary>
@@ -68,7 +69,8 @@ namespace Infrastructure.AI
         /// </summary>
         public static async Task<string> ChatWithMessagesAsync(AiOptions options, object[] messages, string scene = null)
         {
-            return await ChatCoreAsync(options, messages, scene: scene).ConfigureAwait(false);
+            var result = await ChatCoreAsync(options, messages, scene: scene).ConfigureAwait(false);
+            return result?.Content ?? string.Empty;
         }
 
         /// <summary>
@@ -76,7 +78,7 @@ namespace Infrastructure.AI
         /// 非标准 JSON 响应按纯文本兜底返回。
         /// resolvedOverride 非空时（多模态场景）覆盖 model/baseUrl/endpoint，实现文本与视觉模型解耦。
         /// </summary>
-        private static async Task<string> ChatCoreAsync(AiOptions options, object messages,
+        private static async Task<ChatToolResult> ChatCoreAsync(AiOptions options, object messages,
             (string Provider, string BaseUrl, string ChatEndpoint, string Model, string ApiKey)? resolvedOverride = null,
             string scene = null, bool skipThinking = false)
         {
@@ -122,7 +124,7 @@ namespace Infrastructure.AI
                 {
                     outcome = Failed("empty", "empty_response", "AI 服务返回空响应",
                         response.StatusCode, response.RequestId);
-                    return string.Empty;
+                    return new ChatToolResult { Content = string.Empty };
                 }
 
                 try
@@ -147,13 +149,13 @@ namespace Infrastructure.AI
                         throw new HttpRequestException("AI 服务返回了无法解析的响应，请稍后重试或联系管理员");
                     }
                     outcome = Succeeded(usage, response.StatusCode, response.RequestId);
-                    return content;
+                    return ToTextResult(content, usage);
                 }
                 catch (JsonException ex)
                 {
                     Logger.LogError(ex, "解析 AI 响应失败，按纯文本处理");
                     outcome = Succeeded((0, 0, 0), response.StatusCode, response.RequestId, hasUsage: false);
-                    return response.Content;
+                    return new ChatToolResult { Content = response.Content };
                 }
             }
             catch (OperationCanceledException ex)
@@ -275,10 +277,10 @@ namespace Infrastructure.AI
         }
 
         /// <summary>
-        /// 多模态对话：把文本提示与一组图片 URL 一并发送给支持视觉的模型（如 gpt-4o-mini）。
-        /// 图片 URL 须为完整 http(s) 地址（由调用方确保已下载可达）。VisionModel 为空时抛友好异常。
+        /// 多模态对话：把文本提示与一组图片 URL 一并发送给支持视觉的模型。
+        /// 返回 content 与 usage token；VisionModel 为空时抛友好异常。
         /// </summary>
-        public static async Task<string> ChatWithImagesAsync(AiOptions options, string systemPrompt, string textPrompt, List<string> imageUrls, string scene = null)
+        public static async Task<ChatToolResult> ChatWithImagesAsync(AiOptions options, string systemPrompt, string textPrompt, List<string> imageUrls, string scene = null)
         {
             var resolved = ResolveVisionProvider(options);
             if (string.IsNullOrWhiteSpace(resolved.Model))
@@ -337,6 +339,18 @@ namespace Infrastructure.AI
 
             /// <summary>本轮调用合计 token；usage 缺失时为 0</summary>
             public int TotalTokens { get; set; }
+        }
+
+        private static ChatToolResult ToTextResult(string content, (int Prompt, int Completion, int Total) usage)
+        {
+            var total = usage.Total > 0 ? usage.Total : usage.Prompt + usage.Completion;
+            return new ChatToolResult
+            {
+                Content = content ?? string.Empty,
+                PromptTokens = usage.Prompt,
+                CompletionTokens = usage.Completion,
+                TotalTokens = total
+            };
         }
 
         /// <summary>
