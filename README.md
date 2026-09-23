@@ -69,8 +69,8 @@ init-run.bat
 - web 端体验：[http://demo.izhaorui.cn/vue3](http://demo.izhaorui.cn/vue3)
 - Uniapp 版本体验(vue2)：[http://demo.izhaorui.cn/h5](http://demo.izhaorui.cn/h5)
 - Uniapp 版本体验(vue3)：[http://demo.izhaorui.cn/uplus](http://demo.izhaorui.cn/uplus)
-- 移动端工作流体验：[http://demo.izhaorui.cn/wf](http://demo.izhaorui.cn/wf)
-- 账号密码：admin/123456，普通用户 user/123456
+- 移动端工作流体验(vue3-ts版)：[http://demo.izhaorui.cn/wf](http://demo.izhaorui.cn/wf)
+- 账号密码：user/123456(工作流演示联系作者)
 
 | H5                                                                                     | 工作流 |
 | -------------------------------------------------------------------------------------- |--------|
