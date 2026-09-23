@@ -30,7 +30,7 @@ namespace ZR.ServiceCore.Services
                 ClassName = "Job_TenantExpireSuspend",
                 TriggerType = 1,
                 IntervalSecond = 0,
-                IsStart = 1,
+                IsStart = 0,
                 TaskType = 1,
                 TenantId = mainTenantId,
                 Create_by = "system"
@@ -61,7 +61,7 @@ namespace ZR.ServiceCore.Services
                 ClassName = "Job_TenantExpireRemind",
                 TriggerType = 1,
                 IntervalSecond = 0,
-                IsStart = 1,
+                IsStart = 0,
                 TaskType = 1,
                 TenantId = mainTenantId,
                 Create_by = "system"

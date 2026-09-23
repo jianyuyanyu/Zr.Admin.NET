@@ -343,10 +343,16 @@ namespace ZR.ServiceCore.Services
                 result.Add(InitNoticeData(sysNotice).Item1);
                 result.Add(EnsureDefaultTenant());
 
-                result.Add(new SystemTaskSeedService().EnsureSystemTasksSeedData());
-                result.Add(new SystemTaskSeedService().EnsureTenantExpireRemindTaskSeedData());
-                result.Add(new SystemTaskSeedService().EnsureWorkflowTimeoutTaskSeedData());
-                result.Add(new MallSeedService().EnsureTasksSeedData());
+                // 租户生命周期系统任务：仅多租户启用时写入（判据用运行期真相 App.IsTenantEnabled()，
+                // 而非 ModuleInit.Saas 这个"菜单种子"开关）。两个 Job 最终调用的
+                // SysTenantService.SuspendExpiredTenants/RemindExpiringTenants 首行即 EnsureTenantFeatureEnabled()，
+                // 在 UseTenant!=1 时直接抛异常；若无条件落库，非 SaaS 部署会形成"每日必失败"的僵尸任务。
+                // 工作流/商城的内置任务不在此处，随各自模块开关由 ModuleInitRunner.Modules[].Seed 写入。
+                if (App.IsTenantEnabled())
+                {
+                    result.Add(new SystemTaskSeedService().EnsureSystemTasksSeedData());
+                    result.Add(new SystemTaskSeedService().EnsureTenantExpireRemindTaskSeedData());
+                }
 
                 db.Ado.CommitTran();
             }
