@@ -231,7 +231,7 @@ namespace ZR.ServiceCore.Services
 
         /// <summary>
         /// 单独初始化工作流模块：创建工作流菜单与按钮权限，并纳入默认套餐使其对租户可见。
-        /// 由 CLI --initdb 触发，并按 appsettings 的 InitWorkflow 开关决定是否执行。
+        /// 由 CLI --initdb 触发，并按 appsettings 的 ModuleInit.Workflow 开关决定是否执行。
         /// </summary>
         public List<string> InitMenuSeedData()
         {

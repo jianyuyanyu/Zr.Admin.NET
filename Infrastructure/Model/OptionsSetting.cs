@@ -16,25 +16,10 @@ namespace Infrastructure.Model
         /// </summary>
         public bool DemoMode { get; set; }
         /// <summary>
-        /// 是否单独初始化商城模块（开发模式下建商城业务表 + 商城菜单种子）。由 CLI 参数 --initdb 触发后、
-        /// 再按本开关决定是否执行，可在部署时单独控制商城模块是否纳入初始化。
+        /// 模块初始化开关：决定 --initdb 时哪些模块纳入初始化（建表 / 模块内置定时任务 / 模块菜单种子）。
+        /// 与运行期功能开关（TenantSettings.UseTenant、AiOptions.Enable）相互独立。
         /// </summary>
-        public bool InitMall { get; set; }
-        /// <summary>
-        /// 是否单独初始化工作流模块（开发模式下建工作流业务表）。由 CLI 参数 --initdb 触发后、
-        /// 再按本开关决定是否执行，可在部署时单独控制工作流模块是否纳入初始化。
-        /// </summary>
-        public bool InitWorkflow { get; set; } = false;
-        /// <summary>
-        /// 是否初始化独立种子菜单（租户管理、套餐菜单、字典种子、日程管理等系统级菜单/权限）。
-        /// 区别于 InitMall/InitWorkflow 业务模块，此处无业务建表，仅在开关开启时补齐这些菜单与权限。
-        /// 默认 true，保持与原 data.xlsx 全量种子一致；设为 false 可跳过这些菜单种子写入。
-        /// </summary>
-        public bool InitSaasMenu { get; set; }
-        /// <summary>
-        /// 是否初始化Pro种子数据
-        /// </summary>
-        public bool InitPro { get; set; }
+        public ModuleInitOptions ModuleInit { get; set; } = new();
         /// <summary>
         /// 数据库迁移配置（自动发现实体、差异检测、迁移历史）
         /// </summary>
@@ -87,6 +72,35 @@ namespace Infrastructure.Model
         /// </summary>
         public WorkflowOptions Workflow { get; set; } = new WorkflowOptions();
     }
+
+    /// <summary>
+    /// 模块初始化开关：决定 --initdb 时哪些模块纳入初始化（建表 / 模块内置定时任务 / 模块菜单种子）。
+    /// 全部默认 false，按部署实际启用的模块开启；与运行期功能开关
+    /// （TenantSettings.UseTenant、AiOptions.Enable）相互独立，互不推导。
+    /// </summary>
+    public class ModuleInitOptions
+    {
+        /// <summary>
+        /// 初始化 SaaS 平台级菜单与权限（租户管理、套餐菜单、字典种子等）。无独立业务建表。
+        /// </summary>
+        public bool Saas { get; set; }
+
+        /// <summary>
+        /// 初始化商城模块：建商城业务表 + 商城内置定时任务 + 商城菜单。
+        /// </summary>
+        public bool Mall { get; set; }
+
+        /// <summary>
+        /// 初始化工作流模块：建工作流业务表 + 工作流内置定时任务 + 工作流菜单。
+        /// </summary>
+        public bool Workflow { get; set; }
+
+        /// <summary>
+        /// 初始化专业版(AI)菜单与按钮权限。AI 功能本身由 AiOptions.Enable 控制，两者独立。
+        /// </summary>
+        public bool Pro { get; set; }
+    }
+
     /// <summary>
     /// 工作流模块配置
     /// </summary>

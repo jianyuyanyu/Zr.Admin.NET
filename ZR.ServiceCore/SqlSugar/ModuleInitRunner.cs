@@ -28,36 +28,55 @@ namespace ZR.ServiceCore.SqlSugar
         }
 
         /// <summary>
-        /// 独立模块注册表。Key 必须与对应 ITenantModuleInitializer.ModuleName 一致。
-        /// 全量初始化会自动跳过此处注册的模块，改由各自开关（InitMall/InitWorkflow）驱动。
+        /// 独立模块注册表（唯一开关声明处，开关来自 appsettings 的 ModuleInit 分组）。
+        /// Key 必须与对应 ITenantModuleInitializer.ModuleName 一致
+        /// （Pro/Saas 无同名 initializer，RunTables 查不到时安全跳过）。
+        /// 全量初始化会自动跳过此处注册的模块，改由 ModuleInit.Mall/Workflow/Pro/Saas 驱动；
+        /// Seed 用于写入"随模块开关"的模块级数据（如模块内置定时任务），未启用则不落地。
+        /// <para>
+        /// <b>枚举顺序即执行顺序</b>：RunEnabledModules 按声明顺序逐项执行「建表 → Seed → 菜单种子」。
+        /// 因此写菜单的模块必须排在"消费菜单"的模块之前——Saas 的 EnsureTenantPlanMenuSeedData 会把
+        /// 当时的非平台菜单写进默认套餐，故 Pro（AI 菜单）必须排在 Saas 之前，否则首次 --initdb
+        /// 时 AI 菜单尚未存在、进不了套餐（只能靠再次执行才增量补上）。调整顺序前请先确认此约束。
+        /// </para>
         /// </summary>
         private static readonly Dictionary<string, ModuleSpec> Modules = new()
         {
             ["Mall"] = new ModuleSpec
             {
                 DisplayName = "商城",
-                IsEnabled = o => o.InitMall
+                IsEnabled = o => o.ModuleInit.Mall,
+                // 商城内置定时任务随模块开关写入；未启用则不落地，避免调度器反复执行"无表可查"的僵尸任务
+                Seed = () => Log.WriteLine(ConsoleColor.White, new MallSeedService().EnsureTasksSeedData())
             },
             ["Workflow"] = new ModuleSpec
             {
                 DisplayName = "工作流",
-                IsEnabled = o => o.InitWorkflow
+                IsEnabled = o => o.ModuleInit.Workflow,
+                Seed = () => Log.WriteLine(ConsoleColor.White, new SystemTaskSeedService().EnsureWorkflowTimeoutTaskSeedData())
+            },
+            // Pro 必须先于 Saas：AI 菜单需先写入，Saas 的默认套餐同步才能把租户可见的 AI 菜单纳入套餐
+            ["Pro"] = new ModuleSpec
+            {
+                DisplayName = "专业版(AI)",
+                IsEnabled = o => o.ModuleInit.Pro
             },
             ["Saas"] = new ModuleSpec
             {
                 DisplayName = "SaaS",
-                IsEnabled = o => o.InitSaasMenu
+                IsEnabled = o => o.ModuleInit.Saas
             }
         };
 
         /// <summary>
         /// 各模块的"菜单种子"工厂：仅在对应模块开关开启时才调用，写入菜单与按钮权限。
-        /// 与建表解耦，避免模块未启用时误写菜单数据。
+        /// 与建表解耦，避免模块未启用时误写菜单数据。顺序与 <see cref="Modules"/> 保持一致以便对照。
         /// </summary>
         private static readonly Dictionary<string, Func<List<string>>> MenuSeeds = new()
         {
             ["Mall"] = () => new SeedDataService().InitMallMenuSeedData(),
             ["Workflow"] = () => new SeedDataService().InitWorkflowMenuSeedData(),
+            ["Pro"] = () => new SeedDataService().InitProMenuSeedData(),
             ["Saas"] = () => new SeedDataService().InitSaasMenuSeedData()
         };
 
@@ -98,7 +117,7 @@ namespace ZR.ServiceCore.SqlSugar
 
         /// <summary>
         /// 运行指定独立模块的建表初始化（ITenantModuleInitializer.InitializeNonSaaS）+ 可选非菜单种子，
-        /// 并打印完成日志。任一环节失败会打印并终止进程（与原 InitMall/InitWorkflow 行为一致）。
+        /// 并打印完成日志。任一环节失败会打印并终止进程（与原 ModuleInit.Mall/Workflow 行为一致）。
         /// 菜单种子不在此处，统一由 SeedMenu 按开关写入。
         /// </summary>
         public static void Run(string moduleName)

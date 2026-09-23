@@ -35,7 +35,7 @@ namespace ZR.Mall.Service
 
 		public void InitializeNonSaaS()
 		{
-			if (!App.OptionsSetting.InitMall) return;
+			if (!App.OptionsSetting.ModuleInit.Mall) return;
 
 			var db = DbScoped.SugarScope.GetConnectionScope(App.MallDbConfigId);
 			InitCore(db);

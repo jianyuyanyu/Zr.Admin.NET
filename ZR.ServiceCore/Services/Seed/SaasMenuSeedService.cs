@@ -9,7 +9,7 @@ namespace ZR.ServiceCore.Services.Seed
     /// <summary>
     /// SaaS 独立种子菜单服务：不绑定业务模块（区别于商城/工作流模块的建表+菜单种子），
     /// 仅负责补齐 SaaS 平台级菜单与权限（租户管理、套餐菜单、字典种子、日程管理等）。
-    /// 由 appsettings 的 InitSeedMenu 开关统一驱动——仅当开关开启时才写入。
+    /// 由 appsettings 的 ModuleInit.Saas 开关统一驱动（经 ModuleInitRunner 调度）——仅当开关开启时才写入。
     /// </summary>
     public class SaasMenuSeedService
     {
@@ -331,7 +331,7 @@ namespace ZR.ServiceCore.Services.Seed
 
         /// <summary>
         /// 按固定顺序执行全部 SaaS 独立种子菜单（租户/套餐/字典/日程），聚合返回日志行。
-        /// 供 InitTable 在 InitSeedMenu 开关开启时统一调用。
+        /// 供 ModuleInitRunner 在 ModuleInit.Saas 开关开启时统一调用（唯一开关声明处）。
         /// </summary>
         public List<string> EnsureAllSeedMenus()
         {

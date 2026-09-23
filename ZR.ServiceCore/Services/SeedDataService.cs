@@ -306,8 +306,6 @@ namespace ZR.ServiceCore.Services
             var sysArticleCategory = MiniExcel.Query<ArticleCategory>(path, sheetName: "article_category").ToList();
             var sysNotice = MiniExcel.Query<SysNotice>(path, sheetName: "notice").ToList();
 
-            //var sysTenant = MiniExcel.Query<SysTenant>(path, sheetName: "tenant").ToList();
-
             try
             {
                 db.Ado.BeginTran();
@@ -358,36 +356,16 @@ namespace ZR.ServiceCore.Services
                 result.Add($"[种子数据初始化失败] 事务已回滚: {ex.Message}");
             }
 
-            // 独立模块菜单种子：按 appsettings 的 InitMall/InitWorkflow/InitSaasMenu 开关决定是否写入，
-            // 与 CLI --initdb 链路（ModuleInitRunner.RunEnabledModules）行为保持一致。
-            // 放在主事务之外，避免模块菜单写入失败连带回滚核心种子；菜单种子本身幂等。
-            try
-            {
-                var options = App.OptionsSetting;
-                if (options != null)
-                {
-                    if (options.InitPro)
-                    {
-                        // 依赖 InitMenuData 已写入菜单，须排在其后
-                        result.Add(new SystemMenuSeedService().EnsureAiPermSeedData());
-                        result.Add(new SystemMenuSeedService().EnsureAiUsageMenuSeedData());
-                    }
-                    if (options.InitMall) result.AddRange(InitMallMenuSeedData());
-                    if (options.InitWorkflow) result.AddRange(InitWorkflowMenuSeedData());
-                    if (options.InitSaasMenu) result.AddRange(InitSaasMenuSeedData());
-                }
-            }
-            catch (Exception ex)
-            {
-                result.Add($"[独立模块菜单种子失败] {ex.Message}");
-            }
+            // 模块级初始化（建表 + 模块内置任务 + 菜单）不在此处：统一由 ModuleInitRunner.RunEnabledModules
+            // 按 ModuleInit.Saas/Mall/Workflow/Pro 开关驱动，避免"同一套开关散落两处、菜单被重复写入"。
+            // Pro 的 AI 按钮/页面依赖本方法内 InitMenuData 已写入的系统菜单，故由调用方在同一链路之后触发。
 
             return result;
         }
 
         /// <summary>
         /// 单独初始化商城模块：创建商城菜单与按钮权限，并纳入默认套餐使其对租户可见。
-        /// 委托给 MallSeedService，由 CLI --initdb 触发、按 InitMall 开关决定是否执行。
+        /// 委托给 MallSeedService，由 CLI --initdb 触发、按 ModuleInit.Mall 开关决定是否执行。
         /// </summary>
         public List<string> InitMallMenuSeedData()
         {
@@ -396,7 +374,7 @@ namespace ZR.ServiceCore.Services
 
         /// <summary>
         /// 单独初始化工作流模块：创建工作流菜单与按钮权限，并纳入默认套餐使其对租户可见。
-        /// 委托给 WorkflowSeedService，由 CLI --initdb 触发、按 InitWorkflow 开关决定是否执行。
+        /// 委托给 WorkflowSeedService，由 CLI --initdb 触发、按 ModuleInit.Workflow 开关决定是否执行。
         /// </summary>
         public List<string> InitWorkflowMenuSeedData()
         {
@@ -409,6 +387,20 @@ namespace ZR.ServiceCore.Services
         public List<string> InitSaasMenuSeedData()
         {
             return new SaasMenuSeedService().EnsureAllSeedMenus();
+        }
+
+        /// <summary>
+        /// 单独初始化专业版(AI)菜单种子：data.xlsx 系统页下的 AI 能力按钮 +「用量管理 / 我的用量 / AI 办公助手」页面。
+        /// 由 CLI --initdb 触发、按 appsettings 的 ModuleInit.Pro 开关决定是否执行；依赖 InitMenuData 已写入系统菜单。
+        /// </summary>
+        public List<string> InitProMenuSeedData()
+        {
+            var svc = new SystemMenuSeedService();
+            return
+            [
+                svc.EnsureAiPermSeedData(),
+                svc.EnsureAiUsageMenuSeedData()
+            ];
         }
     }
 }

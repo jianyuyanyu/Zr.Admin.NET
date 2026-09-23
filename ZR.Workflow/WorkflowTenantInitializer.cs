@@ -48,7 +48,7 @@ namespace ZR.Workflow
 
 		public void InitializeNonSaaS()
 		{
-			if (!App.OptionsSetting.InitWorkflow) return;
+			if (!App.OptionsSetting.ModuleInit.Workflow) return;
 
 			var db = DbScoped.SugarScope.GetConnectionScope(App.MainDbConfigId);
 			InitCore(db);
