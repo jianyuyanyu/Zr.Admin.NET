@@ -205,20 +205,7 @@ namespace ZR.Workflow.Service
 
                 NotifyUser(instance.ApplyUserId, $"【审批驳回】{instance.Title} 被 {op.NickName} 驳回{(string.IsNullOrEmpty(opinion) ? "" : "：" + opinion)}");
 
-                var strategy = (WfRejectStrategy)node.RejectStrategy;
-                WfFlowNode targetNode = null;
-                if (strategy == WfRejectStrategy.ToPrevNode)
-                {
-                    // 驳回到上一审批节点（NodeOrder 小于当前且为审批节点的最后一个）
-                    targetNode = topo.OrderedNodes
-                        .Where(n => n.NodeType == (int)WfNodeType.Audit && n.NodeOrder < node.NodeOrder)
-                        .OrderByDescending(n => n.NodeOrder)
-                        .FirstOrDefault();
-                }
-                else if (strategy == WfRejectStrategy.ToSpecifiedNode && node.RejectTargetNodeId.HasValue)
-                {
-                    targetNode = topo.GetNode(node.RejectTargetNodeId.Value);
-                }
+                var targetNode = ResolveRejectTarget(node, topo);
 
                 if (targetNode == null)
                 {
@@ -237,6 +224,44 @@ namespace ZR.Workflow.Service
                 logger.Info($"驳回回退：InstanceId={instance.InstanceId} 回退到节点 {targetNode?.NodeName}({targetNode?.NodeId})（策略={(WfRejectStrategy)node.RejectStrategy}）");
                 RollbackToNode(instance, targetNode, topo);
             }, "驳回失败");
+        }
+
+        /// <summary>
+        /// 按节点驳回策略解析回退目标。策略 0 或找不到合法审批节点时返回 null（调用方驳回发起人）。
+        /// 策略 2 存量数据只要目标仍是本流程审批节点即回退，不因 NodeOrder 在当前节点之后而拒绝。
+        /// </summary>
+        private WfFlowNode ResolveRejectTarget(WfFlowNode node, WorkflowTopology topo)
+        {
+            if (node == null || topo == null) return null;
+            var strategy = (WfRejectStrategy)node.RejectStrategy;
+            if (strategy == WfRejectStrategy.ToPrevNode)
+            {
+                return topo.OrderedNodes
+                    .Where(n => n.NodeType == (int)WfNodeType.Audit && n.NodeOrder < node.NodeOrder)
+                    .OrderByDescending(n => n.NodeOrder)
+                    .FirstOrDefault();
+            }
+            if (strategy == WfRejectStrategy.ToSpecifiedNode && node.RejectTargetNodeId.HasValue && node.RejectTargetNodeId.Value != 0)
+            {
+                var target = topo.GetNode(node.RejectTargetNodeId.Value);
+                if (target == null)
+                {
+                    logger.Info($"驳回目标不存在 NodeId={node.RejectTargetNodeId} → 退化为驳回发起人");
+                    return null;
+                }
+                if (target.NodeType != (int)WfNodeType.Audit)
+                {
+                    logger.Info($"驳回目标不是审批节点 Node={target.NodeName}({target.NodeId}) type={target.NodeType} → 退化为驳回发起人");
+                    return null;
+                }
+                if (target.NodeId == node.NodeId)
+                {
+                    logger.Info($"驳回目标不能是自身 Node={node.NodeName}({node.NodeId}) → 退化为驳回发起人");
+                    return null;
+                }
+                return target;
+            }
+            return null;
         }
 
         /// <summary>
@@ -648,19 +673,7 @@ namespace ZR.Workflow.Service
 
                 NotifyUser(instance.ApplyUserId, $"【审批驳回】{instance.Title} 被超时自动驳回（节点「{node.NodeName}」）");
 
-                var strategy = (WfRejectStrategy)node.RejectStrategy;
-                WfFlowNode targetNode = null;
-                if (strategy == WfRejectStrategy.ToPrevNode)
-                {
-                    targetNode = topo.OrderedNodes
-                        .Where(n => n.NodeType == (int)WfNodeType.Audit && n.NodeOrder < node.NodeOrder)
-                        .OrderByDescending(n => n.NodeOrder)
-                        .FirstOrDefault();
-                }
-                else if (strategy == WfRejectStrategy.ToSpecifiedNode && node.RejectTargetNodeId.HasValue)
-                {
-                    targetNode = topo.GetNode(node.RejectTargetNodeId.Value);
-                }
+                var targetNode = ResolveRejectTarget(node, topo);
 
                 if (targetNode == null)
                 {

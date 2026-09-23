@@ -50,6 +50,7 @@ namespace ZR.Workflow.Service
             if (Queryable().Any(f => f.IsDelete == 0 && f.FlowCode == dto.FlowCode))
                 throw new CustomException(ResultCode.CUSTOM_ERROR, $"流程编码「{dto.FlowCode}」已存在，请换一个或改用版本管理", null);
             ValidateLinks(dto.Nodes, dto.NodeLinks); // link 为唯一串联事实：非结束节点必须有出边
+            ValidateRejectTargets(dto.Nodes);
             var def = dto.Adapt<WfFlowDefinition>().ToCreate(App.HttpContext);
             var result = UseTran(() =>
             {
@@ -73,6 +74,7 @@ namespace ZR.Workflow.Service
             def.Version = existing.Version;
             def.IsDraft = existing.IsDraft; // 编辑不清除草稿态，仅发布可改变
             ValidateLinks(dto.Nodes, dto.NodeLinks); // link 为唯一串联事实：非结束节点必须有出边
+            ValidateRejectTargets(dto.Nodes);
             var result = UseTran(() =>
             {
                 Update(def, true, "修改流程定义");
@@ -371,16 +373,29 @@ namespace ZR.Workflow.Service
             var map = new Dictionary<long, long>();
             var srcNodes = GetOrderedNodes(srcFlowId);
             if (srcNodes.Count == 0) return map;
+            var copies = new List<WfFlowNode>(srcNodes.Count);
+            var rawTargets = new List<long?>(srcNodes.Count);
             foreach (var n in srcNodes)
             {
                 var copy = CloneNodeForCopy(n, newFlowId, userName);
-                // 驳回目标节点：源流程中的 RejectTargetNodeId 指向源节点主键，复制后须映射为新流程的主键
-                if (copy.RejectTargetNodeId > 0 && copy.RejectTargetNodeId.HasValue && map.TryGetValue(copy.RejectTargetNodeId.Value, out var newTarget))
-                {
-                    copy.RejectTargetNodeId = newTarget;
-                }
+                rawTargets.Add(copy.RejectTargetNodeId);
+                copy.RejectTargetNodeId = 0;
                 copy = Context.Insertable(copy).ExecuteReturnEntity() ?? throw new CustomException("复制流程节点失败");
                 map[n.NodeId] = copy.NodeId;
+                copies.Add(copy);
+            }
+            var needUpdate = new List<WfFlowNode>();
+            for (var i = 0; i < copies.Count; i++)
+            {
+                var raw = rawTargets[i];
+                if (raw == null || raw.Value == 0) continue;
+                if (!map.TryGetValue(raw.Value, out var newTarget)) continue;
+                copies[i].RejectTargetNodeId = newTarget;
+                needUpdate.Add(copies[i]);
+            }
+            if (needUpdate.Count > 0)
+            {
+                Context.Updateable(needUpdate).UpdateColumns(e => new { e.RejectTargetNodeId }).ExecuteCommand();
             }
             return map;
         }
@@ -431,6 +446,41 @@ namespace ZR.Workflow.Service
                 .Where(l => l.FlowId == flowId)
                 .OrderBy(l => l.Sort)
                 .ToList();
+        }
+
+        /// <summary>
+        /// 策略 2（驳回到指定节点）保存校验：必须选中本流程中、位于当前节点之前的审批节点。
+        /// 前端 clientId（含负数临时 id）按 NodeId 对齐；运行态引擎对存量脏数据另有退化逻辑。
+        /// </summary>
+        private void ValidateRejectTargets(List<WfFlowNodeDto> nodes)
+        {
+            if (nodes == null || nodes.Count == 0) return;
+            var byId = new Dictionary<long, WfFlowNodeDto>();
+            foreach (var n in nodes)
+            {
+                if (n == null) continue;
+                byId[n.NodeId] = n;
+            }
+            foreach (var node in nodes)
+            {
+                if (node == null || node.NodeType != (int)WfNodeType.Audit) continue;
+                if (node.RejectStrategy != (int)WfRejectStrategy.ToSpecifiedNode) continue;
+                if (!node.RejectTargetNodeId.HasValue || node.RejectTargetNodeId.Value == 0)
+                    throw new CustomException(ResultCode.CUSTOM_ERROR,
+                        $"审批节点「{node.NodeName}」已设置驳回到指定节点，但未选择目标", null);
+                if (node.RejectTargetNodeId.Value == node.NodeId)
+                    throw new CustomException(ResultCode.CUSTOM_ERROR,
+                        $"审批节点「{node.NodeName}」的驳回目标不能是自身", null);
+                if (!byId.TryGetValue(node.RejectTargetNodeId.Value, out var target))
+                    throw new CustomException(ResultCode.CUSTOM_ERROR,
+                        $"审批节点「{node.NodeName}」的驳回目标不在本流程中", null);
+                if (target.NodeType != (int)WfNodeType.Audit)
+                    throw new CustomException(ResultCode.CUSTOM_ERROR,
+                        $"审批节点「{node.NodeName}」的驳回目标必须是审批节点", null);
+                if (target.NodeOrder >= node.NodeOrder)
+                    throw new CustomException(ResultCode.CUSTOM_ERROR,
+                        $"审批节点「{node.NodeName}」的驳回目标须为当前节点之前的审批节点", null);
+            }
         }
 
         /// <summary>

@@ -31,7 +31,7 @@ namespace ZR.Tests
             _db.Ensure();
             _db.Clean();
             _db.EnsureUsers("applier", "approver");
-            _engine = new WfEngineService(Mock.Of<ISysUserMsgService>(), Mock.Of<IWfWebhookService>(), Mock.Of<IWfAiService>());
+            _engine = new WfEngineService(Mock.Of<ISysUserMsgService>(), Mock.Of<IWfWebhookService>(), Mock.Of<IWfAiService>(), Mock.Of<ISmsSender>());
             _instanceService = new WfFlowInstanceService(_engine, Mock.Of<IWfAiService>());
         }
 
