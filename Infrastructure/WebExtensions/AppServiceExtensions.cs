@@ -134,12 +134,20 @@ namespace Infrastructure
                 }
 
                 var serviceType = serviceAttribute.ServiceType;
-                //情况1 适用于依赖抽象编程，注意这里只获取第一个
+                //情况1 未指定 ServiceType 时按约定推断：优先取与类名对应的接口（SysConfigService → ISysConfigService），
+                //      使 [AppService] 可以裸写；类名与接口名不对应（如 DefaultSmsSender : ISmsSender）仍需显式指定。
+                //      约定匹配优于 GetInterfaces().FirstOrDefault() —— 后者的接口顺序在 CLR 中无保证。
+                if (serviceType == null)
+                {
+                    serviceType = type.GetInterfaces().FirstOrDefault(i =>
+                        string.Equals(i.Name, $"I{type.Name}", StringComparison.OrdinalIgnoreCase));
+                }
+                //情况2 显式声明 InterfaceServiceType 且约定未命中时，回退取第一个接口（保持既有语义）
                 if (serviceType == null && serviceAttribute.InterfaceServiceType)
                 {
                     serviceType = type.GetInterfaces().FirstOrDefault();
                 }
-                //情况2 不常见特殊情况下才会指定ServiceType，写起来麻烦
+                //情况3 无接口（或约定未命中且未声明 InterfaceServiceType）：注册为自身
                 if (serviceType == null)
                 {
                     serviceType = type;
