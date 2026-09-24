@@ -13,7 +13,7 @@ namespace ${options.ServicesNamespace}.${options.SubNamespace}
     /// <summary>
     /// ${genTable.FunctionName}Service业务层处理
     /// </summary>
-    [AppService(ServiceType = typeof(I${replaceDto.ModelTypeName}Service), ServiceLifetime = LifeTime.Transient)]
+    [AppService(LifeTime.Transient)]
     public class ${replaceDto.ModelTypeName}Service : BaseService<${replaceDto.ModelTypeName}>, I${replaceDto.ModelTypeName}Service
     {
         /// <summary>
