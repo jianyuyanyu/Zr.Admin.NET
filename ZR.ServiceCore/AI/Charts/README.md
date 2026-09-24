@@ -83,7 +83,7 @@ new AiChartMetricDef
 - 地域 TopN / 脱敏：见 login_region
 - 跨模块连表（登录且充值）：新插件，固定查询，不要开放 JOIN
 
-`InjectClass` 已含 `ZR.ServiceCore` / `ZR.Mall` / `ZR.Workflow`。
+`ZR.*` 业务程序集会被自动扫描（类打 `[AppService]` 即注册），无需改配置；非常规命名的插件程序集可在 appsettings 的 `InjectClass` 补充登记。
 
 ### Query 约定
 
